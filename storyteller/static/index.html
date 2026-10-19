@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller</title>
+<style>
+  :root {
+    --bg: #0f0d10; --panel: #171419; --panel-2: #1f1a22; --line: #2e2731;
+    --text: #e6dfe3; --muted: #9b8fa0; --accent: #a4162a; --accent-2: #d4a24c;
+    --ok: #4f9c6b; --warn: #c9803a; --danger: #c03a3a;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 48px 1fr auto; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font: 600 15px var(--serif); letter-spacing: .04em; margin: 0; color: var(--accent-2); }
+  header .scene { flex: 1; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .scene b { color: var(--text); font-weight: 500; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .pill.tense { border-color: var(--warn); color: var(--warn); }
+  .pill.danger, .pill.frenzy { border-color: var(--danger); color: var(--danger); }
+  select, button, input, textarea { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; }
+  button { padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent-2); }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { overflow-y: auto; padding: 24px 32px 12px; scroll-behavior: smooth; }
+  .feed { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .narration { font: 17px/1.6 var(--serif); white-space: pre-wrap; }
+  .player { align-self: flex-end; max-width: 85%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px 12px 2px 12px; padding: 10px 14px; font-size: 15px; white-space: pre-wrap; }
+  .dice { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent-2); border-radius: 6px; padding: 8px 12px; font-size: 13px; }
+  .dice .label { color: var(--muted); }
+  .dice .d { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); font-family: var(--mono); font-size: 13px; }
+  .dice .d.hit { border-color: var(--ok); color: var(--ok); }
+  .dice .d.one { border-color: var(--danger); color: var(--danger); }
+  .dice .d.ten { background: #2a2416; border-color: var(--accent-2); color: var(--accent-2); }
+  .dice .res { font-weight: 600; }
+  .dice .res.botch { color: var(--danger); }
+  .sys, .tool { font-size: 12px; color: var(--muted); font-style: italic; }
+  .trait { font-size: 13px; color: var(--accent-2); }
+  .working { font-size: 12px; color: var(--muted); }
+  .working::after { content: "…"; animation: blink 1s steps(3) infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 16px; font-size: 13px; }
+  aside h2 { font: 600 12px var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+  aside h2:first-child { margin-top: 0; }
+  .sheet .name { font: 600 18px var(--serif); }
+  .sheet .sub { color: var(--muted); margin-bottom: 10px; }
+  .track { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  .track .v { font-family: var(--mono); }
+  .dots { color: var(--accent-2); letter-spacing: 1px; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
+  .kv div:nth-child(even) { text-align: right; font-family: var(--mono); color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); }
+  pre.raw { font-size: 11px; white-space: pre-wrap; color: var(--muted); }
+  footer { grid-column: 1 / 2; border-top: 1px solid var(--line); background: var(--panel); padding: 12px 32px; }
+  .composer { max-width: 760px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+  textarea { flex: 1; min-height: 44px; max-height: 200px; padding: 10px 12px; resize: vertical; line-height: 1.4; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; text-align: center; }
+  .empty { color: var(--muted); text-align: center; margin-top: 15vh; font: 16px var(--serif); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-width: 360px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+  dialog input, dialog select { width: 100%; padding: 8px; }
+  @media (max-width: 900px) { body { grid-template-columns: 1fr; } aside { display: none; } footer { grid-column: 1; } main { padding: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>STORYTELLER</h1>
+  <select id="chronicles" title="Chronicle"></select>
+  <button id="new">New chronicle</button>
+  <div class="scene" id="scene"></div>
+  <span class="pill" id="tension" hidden></span>
+  <button id="end" title="End the session: the Storyteller writes the log to the vault">End session</button>
+</header>
+<main><div class="feed" id="feed"><div class="empty">Create or choose a chronicle to begin.</div></div></main>
+<aside>
+  <h2>Character</h2>
+  <div class="sheet" id="sheet"><div class="sub">No sheet yet.</div></div>
+  <h2>Present</h2>
+  <div id="present" class="sub">—</div>
+  <h2>Table</h2>
+  <div class="kv" id="cfg"></div>
+</aside>
+<footer>
+  <div class="composer">
+    <textarea id="input" placeholder="What does your character do? (Use [brackets] to talk to the Storyteller out of character.)"></textarea>
+    <button id="send" class="primary">Send</button>
+  </div>
+  <div class="hint">Enter to send · Shift+Enter for a new line</div>
+</footer>
+
+<dialog id="dlg">
+  <form method="dialog">
+    <strong>New chronicle</strong>
+    <label>Name</label><input id="dlgName" placeholder="e.g. Anja in New York" required>
+    <label>Campaign</label><select id="dlgCamp"></select>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button value="cancel">Cancel</button><button value="ok" class="primary">Create and begin</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const feed = $("#feed"), main = document.querySelector("main");
+let current = null, busy = false, cfg = null;
+
+async function api(path, opts) {
+  const r = await fetch("/api" + path, Object.assign({headers: {"Content-Type": "application/json"}}, opts));
+  if (!r.ok) throw new Error(await r.text());
+  return r;
+}
+function el(cls, html) { const d = document.createElement("div"); d.className = cls; if (html !== undefined) d.innerHTML = html; return d; }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function scrollDown() { main.scrollTop = main.scrollHeight; }
+
+function renderEvent(ev) {
+  if (ev.kind === "player") return el("player", esc(ev.text));
+  if (ev.kind === "narration") return el("narration", esc(ev.text));
+  if (ev.kind === "dice") {
+    const d = el("dice");
+    d.appendChild(el("label", esc(ev.label || "Roll")));
+    if (ev.hidden) { d.appendChild(el("res", "rolled behind the screen")); return d; }
+    const row = el("row");
+    (ev.dice || []).forEach(n => {
+      const s = document.createElement("span");
+      s.className = "d" + (n === 1 ? " one" : n === 10 ? " ten" : n >= ev.difficulty ? " hit" : "");
+      s.textContent = n; row.appendChild(s);
+    });
+    d.appendChild(row);
+    d.appendChild(el("label", `diff ${ev.difficulty}${ev.specialty ? " · specialty" : ""}${ev.willpower ? " · Willpower" : ""}`));
+    d.appendChild(el("res" + (ev.botch ? " botch" : ""), esc(ev.summary)));
+    return d;
+  }
+  if (ev.kind === "trait") return el("trait", `${esc(ev.reason)} <span style="color:var(--muted)">(${esc(ev.path)}: ${esc(ev.old)} → ${esc(ev.new)})</span>`);
+  if (ev.kind === "tool") return el("tool", esc(ev.detail));
+  if (ev.kind === "system") return el("sys", esc(ev.text));
+  if (ev.kind === "error") return el("sys", "⚠ " + esc(ev.message));
+  return null;
+}
+
+function dots(n) { n = Number(n) || 0; return "●".repeat(Math.min(n, 10)) + "○".repeat(Math.max(0, 5 - n)); }
+function renderSheet(sh) {
+  const box = $("#sheet");
+  if (!sh || !Object.keys(sh).length) { box.innerHTML = '<div class="sub">No sheet yet.</div>'; return; }
+  let h = `<div class="name">${esc(sh.name || "Unnamed")}</div><div class="sub">${esc([sh.clan, sh.generation && sh.generation + "th gen", sh.concept].filter(Boolean).join(" · "))}</div>`;
+  const tracks = [["Blood", sh.blood, sh.blood_max], ["Willpower", sh.willpower, sh.willpower_max], ["Humanity", sh.humanity], ["Health", sh.health], ["XP", sh.experience]];
+  tracks.forEach(([k, v, m]) => { if (v !== undefined) h += `<div class="track"><span>${k}</span><span class="v">${esc(v)}${m !== undefined ? " / " + esc(m) : ""}</span></div>`; });
+  const group = (title, obj) => {
+    if (!obj || typeof obj !== "object") return "";
+    let s = `<h2>${title}</h2><div class="kv">`;
+    const walk = o => Object.entries(o).forEach(([k, v]) => {
+      if (v && typeof v === "object") walk(v);
+      else s += `<div>${esc(k)}</div><div>${typeof v === "number" ? `<span class="dots">${dots(v)}</span>` : esc(v)}</div>`;
+    });
+    walk(obj); return s + "</div>";
+  };
+  h += group("Attributes", sh.attributes) + group("Abilities", sh.abilities) + group("Disciplines", sh.disciplines) + group("Backgrounds", sh.backgrounds) + group("Virtues", sh.virtues);
+  h += `<details style="margin-top:10px"><summary>Full sheet</summary><pre class="raw">${esc(JSON.stringify(sh, null, 2))}</pre></details>`;
+  box.innerHTML = h;
+}
+function renderScene(sc) {
+  sc = sc || {};
+  $("#scene").innerHTML = sc.location ? `<b>${esc(sc.location)}</b> · ${esc(sc.time || "")}${sc.note ? " · " + esc(sc.note) : ""}` : "";
+  const t = $("#tension"); t.hidden = !sc.tension; t.textContent = sc.tension || ""; t.className = "pill " + (sc.tension || "");
+  $("#present").textContent = (sc.present && sc.present.length) ? sc.present.join(", ") : "—";
+}
+
+async function loadChronicles() {
+  const list = await (await api("/chronicles")).json();
+  const sel = $("#chronicles");
+  sel.innerHTML = list.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("") || `<option value="">(no chronicles)</option>`;
+  if (current) sel.value = current;
+  return list;
+}
+async function openChronicle(id) {
+  current = id; localStorage.setItem("st:last", id);
+  const ch = await (await api("/chronicles/" + id)).json();
+  feed.innerHTML = "";
+  ch.events.forEach(ev => { const n = renderEvent(ev); if (n) feed.appendChild(n); });
+  renderSheet(ch.sheet); renderScene(ch.scene); scrollDown();
+}
+
+async function stream(path, body) {
+  if (busy) return; busy = true; $("#send").disabled = true; $("#end").disabled = true;
+  let live = null, working = null;
+  try {
+    const r = await api(path, {method: "POST", body: body ? JSON.stringify(body) : undefined});
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const {value, done} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!chunk.startsWith("data: ")) continue;
+        const ev = JSON.parse(chunk.slice(6));
+        if (ev.kind === "delta") {
+          if (working) { working.remove(); working = null; }
+          if (!live) { live = el("narration", ""); feed.appendChild(live); }
+          live.textContent += ev.text;
+        } else if (ev.kind === "working") {
+          if (!working) { working = el("working", "the Storyteller consults the books"); feed.appendChild(working); }
+        } else if (ev.kind === "narration") {
+          if (live) { live.textContent = ev.text; live = null; }
+        } else if (ev.kind === "done") {
+          if (working) working.remove();
+          renderSheet(ev.state.sheet); renderScene(ev.state.scene);
+        } else {
+          if (ev.kind === "sheet") renderSheet(ev.sheet);
+          else if (ev.kind === "scene") renderScene(ev.scene);
+          else { const n = renderEvent(ev); if (n) feed.appendChild(n); }
+          live = null;
+        }
+        scrollDown();
+      }
+    }
+  } catch (e) {
+    feed.appendChild(el("sys", "⚠ " + esc(e.message)));
+  } finally {
+    busy = false; $("#send").disabled = false; $("#end").disabled = false; $("#input").focus();
+  }
+}
+
+$("#send").onclick = () => {
+  const t = $("#input").value.trim(); if (!t || !current) return;
+  $("#input").value = ""; stream(`/chronicles/${current}/turn`, {text: t});
+};
+$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#send").click(); } });
+$("#end").onclick = () => { if (current && confirm("End the session? The Storyteller will write the log to your vault.")) stream(`/chronicles/${current}/end_session`); };
+$("#chronicles").onchange = e => e.target.value && openChronicle(e.target.value);
+$("#new").onclick = () => { $("#dlgName").value = ""; $("#dlg").showModal(); };
+$("#dlg").addEventListener("close", async () => {
+  if ($("#dlg").returnValue !== "ok") return;
+  const ch = await (await api("/chronicles", {method: "POST", body: JSON.stringify({name: $("#dlgName").value, campaign: $("#dlgCamp").value})})).json();
+  await loadChronicles(); await openChronicle(ch.id);
+  stream(`/chronicles/${ch.id}/begin`);
+});
+
+(async () => {
+  cfg = await (await api("/config")).json();
+  $("#cfg").innerHTML = `<div>model</div><div>${esc(cfg.model)}</div><div>effort</div><div>${esc(cfg.effort)}</div><div>vault</div><div title="${esc(cfg.vault)}">${esc(cfg.vault.split(/[\\/]/).pop())}</div>`;
+  $("#dlgCamp").innerHTML = Object.entries(cfg.campaigns).map(([k, v]) => `<option value="${k}" ${k === cfg.default_campaign ? "selected" : ""}>${esc(v)}</option>`).join("");
+  const list = await loadChronicles();
+  const last = localStorage.getItem("st:last");
+  const pick = list.find(c => c.id === last) || list[0];
+  if (pick) { $("#chronicles").value = pick.id; openChronicle(pick.id); }
+})();
+</script>
+</body>
+</html>
