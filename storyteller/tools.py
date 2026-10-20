@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import config, dice
+from . import dice
 from .db import DB
+from .sheet import LOCATION_KEYS, LOCATION_LABELS, _location
 from .vault import Vault
 
 
@@ -46,20 +47,38 @@ TOOL_SPECS: list[dict] = [
     {
         "name": "set_sheet",
         "description": (
-            "Replace the player's character sheet. Call once character creation is agreed, or when a "
-            "large revision is needed. The sheet is free-form JSON but should include: name, clan, "
-            "generation, sire, nature, demeanor, concept, attributes, abilities, disciplines, "
-            "backgrounds, virtues, humanity, willpower, willpower_max, blood, blood_max, health "
-            "(current level, e.g. 'Healthy'), experience, merits_flaws, notes."
+            "Replace the player's character sheet. Call once character creation is agreed, or for a large "
+            "revision. Keep every value you already track. Use this layout (lowercase keys, snake_case for "
+            "multi-word trait names; include only abilities with dots; secondary abilities go in the matching group):\n"
+            '{"name": "...", "concept": "...", "clan": "...", "generation": 11, "sire": "...", "nature": "...", '
+            '"demeanor": "...", "sect": "Camarilla", "embraced": "1999", "apparent_age": "mid-20s", '
+            '"attributes": {"physical": {"strength": 2, "dexterity": 3, "stamina": 2}, '
+            '"social": {"charisma": 3, "manipulation": 2, "appearance": 4}, '
+            '"mental": {"perception": 3, "intelligence": 2, "wits": 3}}, '
+            '"abilities": {"talents": {"alertness": 1, "subterfuge": 3}, "skills": {"etiquette": 2, "animal_ken": 1}, '
+            '"knowledges": {"academics": 1}}, '
+            '"specialties": {"etiquette": "Elysium"}, '
+            '"disciplines": {"auspex": 2, "presence": 1}, '
+            '"backgrounds": {"resources": 2, "contacts": 1}, '
+            '"virtues": {"conscience": 3, "self_control": 3, "courage": 2}, '
+            '"merits_flaws": [{"name": "Eat Food", "points": 1, "type": "merit"}, {"name": "Haunted", "points": 3, "type": "flaw"}], '
+            '"humanity": 6, "willpower": 3, "willpower_max": 3, "blood": 10, "blood_max": 12, '
+            '"health": {"bashing": 0, "lethal": 0, "aggravated": 0}, '
+            '"experience": {"unspent": 0, "total": 0}, "weakness": "...", "rituals": [], "notes": "..."}\n'
+            "A character on a Path uses \"path\": {\"name\": \"...\", \"rating\": 5} instead of humanity. "
+            "Possessions are not part of the sheet: track them with set_inventory and update_inventory."
         ),
         "input_schema": _schema({"sheet": {"type": "object", "description": "The full character sheet."}}, ["sheet"]),
     },
     {
         "name": "update_trait",
         "description": (
-            "Adjust one value on the player's sheet. Use dotted paths for nested values "
-            "(e.g. 'blood', 'willpower', 'humanity', 'experience', 'attributes.physical.strength'). "
-            "Provide either delta (numeric change) or value (replacement, any JSON type)."
+            "Adjust one value on the player's sheet. Use dotted paths into the sheet layout, e.g. 'blood', "
+            "'willpower', 'humanity', 'health.lethal', 'health.aggravated', 'experience.unspent', "
+            "'abilities.skills.stealth', 'disciplines.auspex'. Give delta (numeric change) or value "
+            "(replacement, any JSON type). Numbers never go below 0, and blood and willpower never exceed "
+            "blood_max and willpower_max. Damage: add to health.bashing, health.lethal or health.aggravated "
+            "after soak; healing subtracts."
         ),
         "input_schema": _schema(
             {
@@ -69,6 +88,60 @@ TOOL_SPECS: list[dict] = [
                 "reason": {"type": "string", "description": "One line the player will see, e.g. 'Spent 1 blood to heal.'"},
             },
             ["path", "reason"],
+        ),
+    },
+    {
+        "name": "set_inventory",
+        "description": (
+            "Replace the character's whole list of possessions. Use at character creation, or to reconcile "
+            "the list with the story. Location is one of: held (in hand), worn, pockets, bag (anything carried "
+            "in a bag, case, or purse), haven, vehicle, elsewhere. Put exactly where in detail (e.g. 'inside "
+            "jacket pocket', 'glovebox of the Civic', 'safe-deposit box, Chase on 5th'). Use notes for condition, "
+            "weapon stats, provenance, or anything the player should remember about the item."
+        ),
+        "input_schema": _schema(
+            {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "location": {"type": "string", "enum": LOCATION_KEYS},
+                            "qty": {"type": "integer", "minimum": 1},
+                            "detail": {"type": "string"},
+                            "notes": {"type": "string"},
+                        },
+                        "required": ["name", "location"],
+                        "additionalProperties": False,
+                    },
+                },
+                "reason": {"type": "string", "description": "Optional line for the player, e.g. 'Starting possessions.'"},
+            },
+            ["items"],
+        ),
+    },
+    {
+        "name": "update_inventory",
+        "description": (
+            "Change one possession, in the same turn the story changes it. Actions: add (gained, bought, "
+            "stolen, handed over; adds to an identical stack), remove (used up, lost, given away, destroyed; "
+            "qty removes part of a stack), move (put down, stashed, picked up, changed pocket; qty moves part "
+            "of a stack), update (change qty, notes or detail, or rename). Refer to an existing item by the id "
+            "on your screen (e.g. 'i4') or its exact name. Always include a short reason the player will see."
+        ),
+        "input_schema": _schema(
+            {
+                "action": {"type": "string", "enum": ["add", "remove", "move", "update"]},
+                "item": {"type": "string", "description": "For add, the new item's name; otherwise an id like 'i4' or the item's name."},
+                "location": {"type": "string", "enum": LOCATION_KEYS, "description": "Required for add and move."},
+                "detail": {"type": "string"},
+                "qty": {"type": "integer", "minimum": 0},
+                "notes": {"type": "string"},
+                "rename": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            ["action", "item", "reason"],
         ),
     },
     {
@@ -162,6 +235,12 @@ for _spec in TOOL_SPECS:
     _spec["eager_input_streaming"] = True
 
 
+def _item_line(it: dict) -> str:
+    qty = f" ×{it['qty']}" if it.get("qty", 1) != 1 else ""
+    where = it["location"] + (f": {it['detail']}" if it.get("detail") else "")
+    return f"{it['id']} {it['name']}{qty} [{where}]"
+
+
 class ToolContext:
     """Binds tool implementations to one chronicle. Emits UI events via `emit`."""
 
@@ -217,28 +296,54 @@ class ToolContext:
 
     def t_read_sheet(self):
         ch = self.db.get_chronicle(self.cid)
-        return json.dumps(ch["sheet"] or {"empty": True, "hint": "No sheet yet. Run character creation and call set_sheet."})
+        sheet = ch["sheet"] or {"empty": True, "hint": "No sheet yet. Run character creation and call set_sheet."}
+        lines = [json.dumps(sheet, ensure_ascii=False), "", "Possessions (tracked separately; change with update_inventory):"]
+        items = ch["inventory"]["items"]
+        lines += [f"- {_item_line(it)}" + (f" — {it['notes']}" if it.get("notes") else "") for it in items] or ["- none recorded"]
+        return "\n".join(lines)
 
     def t_set_sheet(self, sheet):
+        dropped = [k for k in list(sheet) if k.lower() in ("inventory", "possessions")]
+        for k in dropped:
+            sheet.pop(k)
         self.db.set_sheet(self.cid, sheet)
-        self.emit("sheet", {"sheet": sheet})
+        self.emit("state", {})
+        if dropped:
+            return f"sheet saved; the {', '.join(dropped)} key was not saved: record possessions with set_inventory"
         return "sheet saved"
 
     def t_update_trait(self, path, reason, delta=None, value=None):
         ch = self.db.get_chronicle(self.cid)
         sheet = ch["sheet"]
-        parts = path.split(".")
+        parts = [p for p in path.split(".") if p]
+        if not parts:
+            raise ValueError("empty path")
         node = sheet
+        walked = []
         for p in parts[:-1]:
-            node = node.setdefault(p, {})
+            walked.append(p)
+            if p not in node:
+                node[p] = {}
+            node = node[p]
             if not isinstance(node, dict):
-                raise ValueError(f"path {path!r} runs through a non-object")
+                where = ".".join(walked)
+                raise ValueError(
+                    f"'{where}' is currently {json.dumps(node)}, not an object. Replace it first, e.g. "
+                    f"update_trait(path='{where}', value={{...}}), then retry."
+                )
         leaf = parts[-1]
         old = node.get(leaf)
+        clamped = False
         if delta is not None:
-            base = old if isinstance(old, (int, float)) else 0
-            new = base + delta
+            if old is not None and not isinstance(old, (int, float)):
+                raise ValueError(f"'{path}' is {json.dumps(old)}, not a number; use value instead of delta")
+            new = (old or 0) + delta
             new = int(new) if float(new).is_integer() else new
+            if new < 0:
+                new, clamped = 0, True
+            caps = {"blood": "blood_max", "willpower": "willpower_max"}
+            if len(parts) == 1 and leaf in caps and isinstance(sheet.get(caps[leaf]), (int, float)) and new > sheet[caps[leaf]]:
+                new, clamped = sheet[caps[leaf]], True
         elif value is not None:
             new = value
         else:
@@ -246,13 +351,135 @@ class ToolContext:
         node[leaf] = new
         self.db.set_sheet(self.cid, sheet)
         self.emit("trait", {"path": path, "old": old, "new": new, "reason": reason})
-        self.emit("sheet", {"sheet": sheet})
-        return json.dumps({"path": path, "old": old, "new": new})
+        self.emit("state", {})
+        out = {"path": path, "old": old, "new": new}
+        if clamped:
+            out["clamped"] = True
+        return json.dumps(out)
+
+    # ---------- possessions ----------
+    def _clean_item(self, raw: dict, seq: int) -> dict:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"].strip():
+            raise ValueError(f"each item needs a name: {json.dumps(raw)}")
+        qty = raw.get("qty", 1)
+        if not isinstance(qty, int) or isinstance(qty, bool) or qty < 1:
+            qty = 1
+        loc_in = raw.get("location")
+        loc = _location(loc_in)
+        detail = (raw.get("detail") or "").strip()
+        if loc == "elsewhere" and loc_in and str(loc_in).lower() != "elsewhere" and not detail:
+            detail = str(loc_in)
+        return {"id": f"i{seq}", "name": raw["name"].strip(), "location": loc, "qty": qty,
+                "detail": detail, "notes": (raw.get("notes") or "").strip()}
+
+    def t_set_inventory(self, items, reason=""):
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        inv = self.db.get_chronicle(self.cid)["inventory"]
+        seq = inv["seq"]
+        new_items = []
+        for raw in items:
+            seq += 1
+            new_items.append(self._clean_item(raw, seq))
+        self.db.set_inventory(self.cid, {"seq": seq, "items": new_items})
+        self.emit("item", {"op": "set", "count": len(new_items), "reason": reason or "Possessions recorded"})
+        self.emit("state", {})
+        return "possessions saved:\n" + "\n".join(f"- {_item_line(it)}" for it in new_items)
+
+    @staticmethod
+    def _find(items: list[dict], ref: str) -> dict:
+        ref_l = ref.strip().lower()
+        for it in items:
+            if it["id"].lower() == ref_l:
+                return it
+        exact = [it for it in items if it["name"].lower() == ref_l]
+        if len(exact) == 1:
+            return exact[0]
+        partial = exact or [it for it in items if ref_l in it["name"].lower()]
+        if len(partial) == 1:
+            return partial[0]
+        listing = "; ".join(_item_line(it) for it in (partial or items)) or "nothing recorded"
+        if partial:
+            raise ValueError(f"'{ref}' matches several items, use an id: {listing}")
+        raise ValueError(f"no possession matches '{ref}'. Current possessions: {listing}")
+
+    def t_update_inventory(self, action, item, reason, location=None, detail=None, qty=None, notes=None, rename=None):
+        inv = self.db.get_chronicle(self.cid)["inventory"]
+        items = inv["items"]
+        ev = {"op": action, "reason": reason}
+        if action == "add":
+            if not location:
+                raise ValueError("add needs a location")
+            loc = _location(location)
+            n = qty if isinstance(qty, int) and qty > 0 else 1
+            same = next((it for it in items if it["name"].lower() == item.strip().lower()
+                         and it["location"] == loc and (it.get("detail") or "") == (detail or "").strip()), None)
+            if same:
+                same["qty"] += n
+                if notes:
+                    same["notes"] = notes.strip()
+                target = same
+            else:
+                inv["seq"] += 1
+                target = self._clean_item({"name": item, "location": loc, "qty": n, "detail": detail, "notes": notes}, inv["seq"])
+                items.append(target)
+            ev.update(name=target["name"], qty=n, to=LOCATION_LABELS[target["location"]], detail=target["detail"])
+        elif action == "remove":
+            target = self._find(items, item)
+            if isinstance(qty, int) and 0 < qty < target["qty"]:
+                target["qty"] -= qty
+                ev.update(name=target["name"], qty=qty, left=target["qty"])
+            else:
+                items.remove(target)
+                ev.update(name=target["name"], qty=target["qty"])
+        elif action == "move":
+            if not location:
+                raise ValueError("move needs a location")
+            target = self._find(items, item)
+            loc = _location(location)
+            from_label = LOCATION_LABELS[target["location"]]
+            if isinstance(qty, int) and 0 < qty < target["qty"]:
+                target["qty"] -= qty
+                inv["seq"] += 1
+                moved = dict(target, id=f"i{inv['seq']}", qty=qty, location=loc, detail=(detail or "").strip())
+                items.append(moved)
+                target = moved
+            else:
+                target["location"] = loc
+                if detail is not None:
+                    target["detail"] = detail.strip()
+            ev.update(name=target["name"], qty=qty, **{"from": from_label}, to=LOCATION_LABELS[loc], detail=target["detail"])
+        elif action == "update":
+            target = self._find(items, item)
+            changes = []
+            if rename:
+                changes.append(f"renamed from {target['name']}")
+                target["name"] = rename.strip()
+            if isinstance(qty, int):
+                if qty <= 0:
+                    items.remove(target)
+                    changes.append("none left")
+                else:
+                    changes.append(f"qty {target['qty']} → {qty}")
+                    target["qty"] = qty
+            if detail is not None:
+                target["detail"] = detail.strip()
+                changes.append("location detail")
+            if notes is not None:
+                target["notes"] = notes.strip()
+                changes.append("notes")
+            ev.update(name=target["name"], changes=", ".join(changes))
+        else:
+            raise ValueError(f"unknown action {action!r}")
+        self.db.set_inventory(self.cid, inv)
+        self.emit("item", ev)
+        self.emit("state", {})
+        return json.dumps({"ok": True, "possessions": [_item_line(it) for it in items]}, ensure_ascii=False)
 
     def t_set_scene(self, location, time, present=None, tension="calm", note=""):
         scene = {"location": location, "time": time, "present": present or [], "tension": tension, "note": note}
         self.db.set_scene(self.cid, scene)
-        self.emit("scene", {"scene": scene})
+        self.emit("state", {})
         return "scene updated"
 
     # ---------- private notes ----------

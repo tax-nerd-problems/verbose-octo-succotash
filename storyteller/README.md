@@ -15,14 +15,31 @@ uvicorn storyteller.server:app --port 8000
 
 Open http://localhost:8000, click **New chronicle**, and the Storyteller opens with character creation.
 
+## Playing
+
+- **Your sheet.** The **Sheet** button (top right) opens a full V20 character sheet: attributes, abilities, disciplines, backgrounds, virtues, merits and flaws, Humanity, Willpower, blood pool, health track, and experience. It updates live as the Storyteller changes things.
+- **What you're carrying.** The side panel lists what's on you right now, and the sheet's **Possessions** tab shows everything: in hand, worn, pockets, bag, and what's stashed at your haven, in a car, or elsewhere. The Storyteller records every change as the story makes it. Click any gold line in the transcript to jump to the right tab.
+- **Reading at your own pace.** When you send a move, your message moves to the top of the screen and the reply appears beneath it. The page never scrolls by itself while the Storyteller writes. If the reply runs past the bottom, a **New text below** button appears; scroll whenever you like.
+
 ## How it works
 
 - **Cached core.** `prompts/system.md`, the Storyteller Reference folder, the campaign overview and blurb, and the Setting folder are sent as the system prompt on every turn. The prompt is stable, so after the first turn it is read from Anthropic's prompt cache at a fraction of the price.
 - **On-demand library.** Everything else in the vault is reachable through tools: `search_vault`, `read_note`, `list_notes`. The Storyteller reads an NPC's note before that NPC speaks.
-- **Honest mechanics.** Dice are rolled by `roll_dice` (V20 rules, 1s cancel, botches, specialties, Willpower), never by the model. The character sheet changes only through `set_sheet` and `update_trait`. Hidden rolls show the player only "rolled behind the screen".
-- **Memory.** Chat history, the sheet, the scene, and the Storyteller's private notes live in `storyteller/chronicles.db` (SQLite, gitignored). Private notes hold NPC agendas, clocks, secrets, and a recap.
+- **Honest mechanics.** Dice are rolled by `roll_dice` (V20 rules, 1s cancel, botches, specialties, Willpower), never by the model. The character sheet changes only through `set_sheet` and `update_trait`, and possessions only through `set_inventory` and `update_inventory`. Hidden rolls show the player only "rolled behind the screen".
+- **Memory.** Chat history, the sheet, possessions, the scene, and the Storyteller's private notes live in `storyteller/chronicles.db` (SQLite, gitignored). Private notes hold NPC agendas, clocks, secrets, and a recap.
 - **Write-back.** "End session" makes the Storyteller write a log to `Sessions/` in the vault, append dated chronicle notes to NPC notes under a `## Chronicle Notes (AI Storyteller)` heading, and update `char state` in frontmatter when someone dies or disappears. It never deletes or rewrites your original text.
 - **Long campaigns.** Server-side compaction (beta) summarizes old history automatically when the context grows large.
+
+## Updating without losing your chronicle
+
+Everything you've played lives in `storyteller/chronicles.db`. Before any update, copy that file somewhere safe, such as your Desktop.
+
+- **If you use git:** `git pull`. The database and `.venv` are ignored by git and stay put.
+- **If you downloaded a zip:** open the new zip, go into its `storyteller` folder, select everything inside, and drag it into your existing `storyteller` folder, choosing **Replace** for files that already exist. Don't replace the whole `storyteller` folder itself: on a Mac that deletes your database and `.venv`. If that happens, copy `chronicles.db` back from your backup and rerun the `pip install` step.
+
+Then restart the server. If `requirements.txt` changed, rerun `pip install -r storyteller/requirements.txt` first.
+
+**Editing notes mid-chronicle.** You can edit any vault note while a chronicle is running. Changes to the notes loaded into every turn (the Storyteller Reference, Setting, and campaign overview notes) take effect the next time you start the server. When the app detects that the Storyteller's instructions changed, whether from an update or your edits, it clears the model's hidden reasoning from earlier turns once so the API keeps accepting the chronicle. Narration, rolls, and notes are untouched.
 
 ## Configuration
 
@@ -44,7 +61,7 @@ To add a campaign, add an entry to `CAMPAIGNS` in `config.py` with the core file
 
 ## Tests
 
-Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, and the turn loop against a scripted fake client:
+Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, the character sheet display (including older sheet shapes), possessions, upgrading an older database, and the turn loop against a scripted fake client:
 
 ```bash
 python -m unittest storyteller.tests.test_offline -v

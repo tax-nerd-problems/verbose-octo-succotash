@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
+from typing import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -37,16 +39,35 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 
+# Columns added after the first release; created on startup for older databases.
+MIGRATIONS = {
+    "inventory": "ALTER TABLE chronicles ADD COLUMN inventory TEXT NOT NULL DEFAULT '{}'",
+    "prefix_hash": "ALTER TABLE chronicles ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
+}
+
+THINKING_TYPES = {"thinking", "redacted_thinking"}
+
+
 class DB:
     def __init__(self, path: Path | str | None = None):
         self.path = str(path or config.DB_PATH)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            have = {r["name"] for r in c.execute("PRAGMA table_info(chronicles)")}
+            for col, sql in MIGRATIONS.items():
+                if col not in have:
+                    c.execute(sql)
 
-    def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, check_same_thread=False)
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        """One short-lived connection per operation: commit on success, always close."""
+        c = sqlite3.connect(self.path)
         c.row_factory = sqlite3.Row
-        return c
+        try:
+            with c:
+                yield c
+        finally:
+            c.close()
 
     # ---------- chronicles ----------
     def create_chronicle(self, name: str, campaign: str) -> dict:
@@ -69,12 +90,16 @@ class DB:
         if not r:
             return None
         d = dict(r)
-        for k in ("sheet", "scene", "notes"):
-            d[k] = json.loads(d[k] or "{}")
+        for k in ("sheet", "scene", "notes", "inventory"):
+            d[k] = json.loads(d.get(k) or "{}")
+        if isinstance(d["inventory"], list):  # tolerate a bare list
+            d["inventory"] = {"seq": len(d["inventory"]), "items": d["inventory"]}
+        d["inventory"].setdefault("seq", 0)
+        d["inventory"].setdefault("items", [])
         return d
 
     def _set_json(self, cid: str, column: str, value: dict) -> None:
-        assert column in {"sheet", "scene", "notes"}
+        assert column in {"sheet", "scene", "notes", "inventory"}
         with self._conn() as c:
             c.execute(f"UPDATE chronicles SET {column} = ? WHERE id = ?", (json.dumps(value, ensure_ascii=False), cid))
 
@@ -86,6 +111,13 @@ class DB:
 
     def set_notes(self, cid: str, notes: dict) -> None:
         self._set_json(cid, "notes", notes)
+
+    def set_inventory(self, cid: str, inventory: dict) -> None:
+        self._set_json(cid, "inventory", inventory)
+
+    def set_prefix_hash(self, cid: str, value: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE chronicles SET prefix_hash = ? WHERE id = ?", (value, cid))
 
     # ---------- API history ----------
     def get_messages(self, cid: str) -> list[dict]:
@@ -102,6 +134,39 @@ class DB:
                 "INSERT INTO messages (chronicle_id, seq, role, content) VALUES (?, ?, ?, ?)",
                 (cid, seq, role, json.dumps(content, ensure_ascii=False)),
             )
+
+    def strip_thinking(self, cid: str) -> int:
+        """Remove every thinking block from the stored history. Returns how many were removed.
+
+        A thinking block is only valid in the exact conversation that produced it,
+        including the system prompt and tool list. When those change (an app update,
+        or an edit to a vault note in the cached prompt), the API rejects old blocks on
+        accounts where the check is enforced. Dropping them once keeps the chronicle
+        playable; the narration, tool calls and results all stay.
+        """
+        removed = 0
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT seq, content FROM messages WHERE chronicle_id = ? AND role = 'assistant'", (cid,)
+            ).fetchall()
+            for r in rows:
+                content = json.loads(r["content"])
+                if not isinstance(content, list):
+                    continue
+                kept = [b for b in content if not (isinstance(b, dict) and b.get("type") in THINKING_TYPES)]
+                if len(kept) != len(content):
+                    removed += len(content) - len(kept)
+                    if not kept:
+                        kept = [{"type": "text", "text": "…"}]
+                    c.execute(
+                        "UPDATE messages SET content = ? WHERE chronicle_id = ? AND seq = ?",
+                        (json.dumps(kept, ensure_ascii=False), cid, r["seq"]),
+                    )
+        return removed
+
+    def has_messages(self, cid: str) -> bool:
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM messages WHERE chronicle_id = ? LIMIT 1", (cid,)).fetchone() is not None
 
     def pop_last_messages(self, cid: str, n: int) -> None:
         """Remove the last n history entries (used to unwind a turn that never got a response)."""
@@ -121,6 +186,10 @@ class DB:
                 (cid, seq, ts, kind, json.dumps(payload, ensure_ascii=False)),
             )
         return {"seq": seq, "ts": ts, "kind": kind, **payload}
+
+    def delete_event(self, cid: str, seq: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM events WHERE chronicle_id = ? AND seq = ?", (cid, seq))
 
     def get_events(self, cid: str) -> list[dict]:
         with self._conn() as c:

@@ -5,7 +5,6 @@ Run from the vault root:  python -m unittest storyteller.tests.test_offline -v
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 import unittest
@@ -14,7 +13,7 @@ from types import SimpleNamespace
 
 VAULT = Path(__file__).resolve().parents[2]
 
-from storyteller import config, dice  # noqa: E402
+from storyteller import config  # noqa: E402
 from storyteller.db import DB  # noqa: E402
 from storyteller.storyteller import Storyteller, build_system  # noqa: E402
 from storyteller.tools import TOOL_SPECS  # noqa: E402
@@ -150,6 +149,10 @@ def msg(*blocks, stop="end_turn"):
     return SimpleNamespace(content=list(blocks), stop_reason=stop)
 
 
+def _Msg(blocks, stop="end_turn"):
+    return SimpleNamespace(content=list(blocks), stop_reason=stop)
+
+
 def text(t):
     return _Block(type="text", text=t)
 
@@ -181,7 +184,7 @@ class TurnLoopTests(unittest.TestCase):
         kinds = [e["kind"] for e in events]
         self.assertEqual(kinds[0], "player")
         self.assertIn("dice", kinds)
-        self.assertIn("scene", kinds)
+        self.assertIn("state", kinds)  # live sheet/scene refresh
         self.assertIn("trait", kinds)
         self.assertIn("narration", kinds)
         self.assertEqual(kinds[-1], "done")
@@ -202,7 +205,13 @@ class TurnLoopTests(unittest.TestCase):
         # state persisted
         ch = self.db.get_chronicle(self.ch["id"])
         self.assertEqual(ch["scene"]["location"], "The Met")
-        self.assertEqual(ch["sheet"]["blood"], -1)
+        self.assertEqual(ch["sheet"]["blood"], 0)  # never below zero
+        # live state events are not saved to the transcript
+        self.assertFalse(any(e["kind"] == "state" for e in self.db.get_events(self.ch["id"])))
+        done = events[-1]
+        self.assertEqual(done["scene"]["location"], "The Met")
+        self.assertIn("view", done)
+        self.assertNotIn("notes", done)
         self.assertTrue(any(e["kind"] == "dice" and not e.get("hidden") and len(e["dice"]) == 5 for e in self.db.get_events(self.ch["id"])))
 
     def test_hidden_roll_and_bad_tool(self):
@@ -230,8 +239,254 @@ class TurnLoopTests(unittest.TestCase):
 
         st = Storyteller(self.db, self.vault, Boom([]))
         events = list(st.turn(self.ch["id"], "Hello"))
-        self.assertEqual(events[-2]["kind"], "error")
+        err = events[-2]
+        self.assertEqual(err["kind"], "error")
+        self.assertEqual(err["restore_text"], "Hello")
         self.assertEqual(self.db.get_messages(self.ch["id"]), [])
+        self.assertEqual(self.db.get_events(self.ch["id"]), [])  # the unsent message leaves no trace
+
+
+# ---------- sheet view ----------
+from storyteller.sheet import sheet_view  # noqa: E402
+
+CANONICAL = {
+    "name": "Anja", "concept": "Disgraced violinist", "clan": "Toreador", "generation": 11, "sire": "Rene Valentine",
+    "nature": "Visionary", "demeanor": "Bon Vivant",
+    "attributes": {"physical": {"strength": 2, "dexterity": 3, "stamina": 2},
+                   "social": {"charisma": 4, "manipulation": 3, "appearance": 4},
+                   "mental": {"perception": 3, "intelligence": 2, "wits": 3}},
+    "abilities": {"talents": {"empathy": 3, "subterfuge": 2}, "skills": {"performance": 4, "animal_ken": 1, "dancing": 2},
+                  "knowledges": {"occult": 1}},
+    "specialties": {"performance": "Violin"},
+    "disciplines": {"auspex": 1, "celerity": 1, "presence": 2},
+    "backgrounds": {"resources": 2},
+    "virtues": {"courage": 2, "conscience": 3, "self_control": 4},
+    "merits_flaws": [{"name": "Eat Food", "points": 1, "type": "merit"}, {"name": "Haunted", "points": 3, "type": "flaw"}],
+    "humanity": 7, "willpower": 3, "willpower_max": 4, "blood": 9, "blood_max": 12,
+    "health": {"bashing": 1, "lethal": 2, "aggravated": 1},
+    "experience": {"unspent": 2, "total": 5}, "weakness": "Rapture", "notes": "Owes Rene a boon.",
+}
+
+
+class SheetViewTests(unittest.TestCase):
+    def test_canonical(self):
+        v = sheet_view(CANONICAL)
+        self.assertEqual(v["subtitle"], "Toreador · 11th generation · Disgraced violinist")
+        social = v["attributes"][1]["traits"]
+        self.assertEqual([(t["name"], t["rating"]) for t in social], [("Charisma", 4), ("Manipulation", 3), ("Appearance", 4)])
+        skills = {t["name"]: t for t in v["abilities"][1]["traits"]}
+        self.assertEqual(skills["Performance"]["specialty"], "Violin")
+        self.assertEqual(skills["Animal Ken"]["rating"], 1)
+        self.assertEqual(skills["Dancing"]["rating"], 2)  # secondary ability stays in its group
+        self.assertEqual(len(v["abilities"][0]["traits"]), 10)
+        self.assertEqual([t["name"] for t in v["virtues"]], ["Conscience", "Self-Control", "Courage"])
+        self.assertEqual(v["blood"], {"current": 9, "max": 12, "per_turn": 1})
+        self.assertEqual(v["willpower"], {"current": 3, "max": 4})
+        self.assertEqual([b["mark"] for b in v["health"]["boxes"]], ["*", "X", "X", "/", "", "", ""])
+        self.assertEqual((v["health"]["status"], v["health"]["penalty"]), ("Wounded", -2))
+        self.assertEqual([m["kind"] for m in v["merits_flaws"]], ["merit", "flaw"])
+        self.assertEqual([x["label"] for x in v["extras"]], ["Notes"])
+
+    def test_legacy_shapes(self):
+        legacy = {
+            "Name": "Bea", "Clan": "Malkavian", "Generation": "12th",
+            "Strength": 1, "Dexterity": 2, "Charisma": "3",
+            "abilities": ["Brawl 2", "Stealth (Shadows) 3", "Occult: 1"],
+            "disciplines": ["Auspex 2", "Obfuscate 1"],
+            "merits_flaws": ["Eat Food (1pt Merit)", "Nightmares (-1)"],
+            "path": {"name": "Path of Night", "rating": 5},
+            "willpower": {"permanent": 5, "temporary": 2},
+            "health": "Injured (-1)", "experience": 4, "equipment": ["Knife"],
+        }
+        v = sheet_view(legacy)
+        self.assertEqual(v["name"], "Bea")
+        phys = {t["name"]: t["rating"] for t in v["attributes"][0]["traits"]}
+        self.assertEqual(phys, {"Strength": 1, "Dexterity": 2, "Stamina": 0})
+        self.assertEqual(v["attributes"][1]["traits"][0]["rating"], 3)
+        skills = {t["name"]: t for t in v["abilities"][1]["traits"]}
+        self.assertEqual((skills["Stealth"]["rating"], skills["Stealth"]["specialty"]), (3, "Shadows"))
+        self.assertEqual(v["morality"], {"label": "Path of Night", "rating": 5})
+        self.assertEqual(v["willpower"], {"current": 2, "max": 5})
+        self.assertEqual(v["health"]["status"], "Injured")
+        self.assertEqual(sum(1 for b in v["health"]["boxes"] if b["mark"]), 3)
+        self.assertEqual(v["merits_flaws"][1], {"name": "Nightmares", "points": 1, "kind": "flaw", "note": None})
+        self.assertEqual(v["experience"]["unspent"], 4)
+        self.assertIn("Equipment", [x["label"] for x in v["extras"]])
+        self.assertIsNone(v["blood"])
+
+    def test_empty_and_inventory(self):
+        v = sheet_view({}, {"seq": 3, "items": [
+            {"id": "i1", "name": "Glock 17", "location": "held"},
+            {"id": "i2", "name": "Cash", "location": "pockets", "qty": 340},
+            {"id": "i3", "name": "Laptop", "location": "haven", "detail": "under the bed"},
+        ]})
+        self.assertTrue(v["empty"])
+        inv = v["inventory"]
+        self.assertEqual([g["key"] for g in inv["carried"]], ["held", "pockets"])
+        self.assertEqual([g["key"] for g in inv["stashed"]], ["haven"])
+        self.assertEqual(inv["count"], 3)
+
+
+# ---------- possessions & traits ----------
+from storyteller.tools import ToolContext  # noqa: E402
+
+
+class InventoryToolTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = DB(self.tmp / "t.db")
+        self.ch = self.db.create_chronicle("Inv", "campaign1")
+        self.events = []
+        self.ctx = ToolContext(self.db, None, self.ch["id"], lambda k, p: self.events.append((k, p)))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def items(self):
+        return self.db.get_chronicle(self.ch["id"])["inventory"]["items"]
+
+    def test_inventory_lifecycle(self):
+        run = self.ctx.run
+        run("set_inventory", {"items": [
+            {"name": "Cash", "location": "pockets", "qty": 340, "detail": "wallet"},
+            {"name": "Keys", "location": "pockets"},
+            {"name": "Glock 17", "location": "bag", "notes": "4L, 17 rounds"},
+            {"name": "Car keys", "location": "glovebox of the Civic"},  # free text is mapped
+        ], "reason": "Starting possessions"})
+        self.assertEqual([i["id"] for i in self.items()], ["i1", "i2", "i3", "i4"])
+        self.assertEqual(self.items()[3]["location"], "vehicle")
+        run("update_inventory", {"action": "remove", "item": "Cash", "qty": 40, "reason": "Paid the cabbie"})
+        self.assertEqual(self.items()[0]["qty"], 300)
+        run("update_inventory", {"action": "move", "item": "i3", "location": "held", "reason": "Draws the gun"})
+        self.assertEqual(self.items()[2]["location"], "held")
+        run("update_inventory", {"action": "add", "item": "Rene's calling card", "location": "pockets", "reason": "A gift"})
+        self.assertEqual(self.items()[-1]["id"], "i5")
+        run("update_inventory", {"action": "move", "item": "cash", "location": "haven", "qty": 100, "detail": "coffee tin", "reason": "Stashed"})
+        cash = [i for i in self.items() if i["name"] == "Cash"]
+        self.assertEqual(sorted((i["location"], i["qty"]) for i in cash), [("haven", 100), ("pockets", 200)])
+        with self.assertRaises(ValueError) as cm:
+            run("update_inventory", {"action": "remove", "item": "cash", "reason": "x"})
+        self.assertIn("several", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            run("update_inventory", {"action": "remove", "item": "crowbar", "reason": "x"})
+        self.assertIn("no possession", str(cm.exception))
+        run("update_inventory", {"action": "update", "item": "i3", "notes": "4L, 15 rounds", "reason": "Fired twice"})
+        run("update_inventory", {"action": "remove", "item": "Keys", "reason": "Lost in the fight"})
+        self.assertNotIn("Keys", [i["name"] for i in self.items()])
+        ops = [p["op"] for k, p in self.events if k == "item"]
+        self.assertEqual(ops, ["set", "remove", "move", "add", "move", "update", "remove"])
+        self.assertIn("Possessions", self.ctx.run("read_sheet", {}))
+
+    def test_trait_updates(self):
+        run = self.ctx.run
+        run("set_sheet", {"sheet": {"name": "A", "blood": 5, "blood_max": 12, "health": "Healthy", "possessions": ["x"]}})
+        self.assertNotIn("possessions", self.db.get_chronicle(self.ch["id"])["sheet"])
+        out = json.loads(run("update_trait", {"path": "blood", "delta": 20, "reason": "Fed"}))
+        self.assertEqual((out["new"], out.get("clamped")), (12, True))
+        with self.assertRaises(ValueError) as cm:
+            run("update_trait", {"path": "health.lethal", "delta": 1, "reason": "Shot"})
+        self.assertIn("not an object", str(cm.exception))
+        run("update_trait", {"path": "health", "value": {"bashing": 0, "lethal": 0, "aggravated": 0}, "reason": "Track damage"})
+        run("update_trait", {"path": "health.lethal", "delta": 2, "reason": "Shot"})
+        self.assertEqual(self.db.get_chronicle(self.ch["id"])["sheet"]["health"]["lethal"], 2)
+
+
+# ---------- upgrading an existing save ----------
+import sqlite3  # noqa: E402
+
+import anthropic  # noqa: E402
+
+from storyteller import storyteller as stmod  # noqa: E402
+
+
+class UpgradeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.vault = Vault(VAULT)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _legacy_db(self):
+        """A database exactly as the first release created it, with one played turn."""
+        path = self.tmp / "old.db"
+        c = sqlite3.connect(path)
+        c.executescript("""
+            CREATE TABLE chronicles (id TEXT PRIMARY KEY, name TEXT NOT NULL, campaign TEXT NOT NULL, created TEXT NOT NULL,
+                sheet TEXT NOT NULL DEFAULT '{}', scene TEXT NOT NULL DEFAULT '{}', notes TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE messages (chronicle_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+                PRIMARY KEY (chronicle_id, seq));
+            CREATE TABLE events (chronicle_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL, kind TEXT NOT NULL,
+                payload TEXT NOT NULL, PRIMARY KEY (chronicle_id, seq));
+        """)
+        c.execute("INSERT INTO chronicles VALUES ('abc', 'Old', 'campaign1', '2026-10-19', ?, '{}', '{}')",
+                  (json.dumps({"name": "Anja", "health": "Healthy"}),))
+        rows = [
+            ("user", [{"type": "text", "text": "[The table is ready. Begin.]"}]),
+            ("system", "Storyteller screen: {}"),
+            ("assistant", [{"type": "thinking", "thinking": "", "signature": "sig1"}, {"type": "text", "text": "Welcome."}]),
+            ("user", [{"type": "text", "text": "I bow."}]),
+            ("system", "Storyteller screen: {}"),
+            ("assistant", [{"type": "thinking", "thinking": "", "signature": "sig2"}]),
+        ]
+        for i, (role, content) in enumerate(rows, 1):
+            c.execute("INSERT INTO messages VALUES ('abc', ?, ?, ?)", (i, role, json.dumps(content)))
+        c.commit()
+        c.close()
+        return DB(path)
+
+    def test_old_database_upgrades_and_old_thinking_is_cleared(self):
+        db = self._legacy_db()
+        ch = db.get_chronicle("abc")
+        self.assertEqual(ch["inventory"], {"seq": 0, "items": []})
+        self.assertEqual(ch["prefix_hash"], "")
+        client = FakeClient([msg(text("The night goes on."))])
+        list(Storyteller(db, self.vault, client).turn("abc", "I look around."))
+        sent = client.requests[0]["messages"]
+        blocks = [b for m in sent if m["role"] == "assistant" for b in m["content"]]
+        self.assertFalse([b for b in blocks if b["type"] == "thinking"])
+        self.assertEqual(sent[5]["content"], [{"type": "text", "text": "…"}])  # an all-thinking turn keeps a placeholder
+        self.assertTrue(db.get_chronicle("abc")["prefix_hash"])
+
+    def test_unchanged_instructions_keep_thinking(self):
+        db = DB(self.tmp / "new.db")
+        ch = db.create_chronicle("New", "campaign1")
+        st = Storyteller(db, self.vault, FakeClient([
+            _Msg([_Block(type="thinking", thinking="", signature="s"), text("One.")]),
+            _Msg([_Block(type="thinking", thinking="", signature="t"), text("Two.")]),
+        ]))
+        list(st.turn(ch["id"], "a"))
+        list(st.turn(ch["id"], "b"))
+        second = st.client.requests[1]["messages"]
+        self.assertIn("thinking", [b["type"] for m in second if m["role"] == "assistant" for b in m["content"]])
+
+    def test_rejected_thinking_is_cleared_and_retried(self):
+        db = DB(self.tmp / "heal.db")
+        ch = db.create_chronicle("Heal", "campaign1")
+        db.append_message(ch["id"], "user", [{"type": "text", "text": "hi"}])
+        db.append_message(ch["id"], "system", "screen")
+        db.append_message(ch["id"], "assistant", [{"type": "thinking", "thinking": "", "signature": "x"}, {"type": "text", "text": "Hello."}])
+        st = Storyteller(db, self.vault, None)
+        db.set_prefix_hash(ch["id"], stmod.prefix_hash(st.system_for("campaign1"), stmod.TOOL_SPECS))
+
+        class Rejecting(FakeClient):
+            def _stream(self, **kw):
+                self.requests.append(kw)
+                if len(self.requests) == 1:
+                    import httpx2
+                    resp = httpx2.Response(400, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))
+                    raise anthropic.BadRequestError(
+                        "messages.2.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.",
+                        response=resp, body={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid `signature` in `thinking` block"}},
+                    )
+                return FakeStream(self.script.pop(0))
+
+        st.client = Rejecting([msg(text("Recovered."))])
+        events = list(st.turn(ch["id"], "again"))
+        self.assertIn("narration", [e["kind"] for e in events])
+        self.assertEqual(len(st.client.requests), 2)
+        retry = st.client.requests[1]["messages"]
+        self.assertFalse([b for m in retry if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"])
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import config
-from .storyteller import Storyteller
+from .storyteller import Storyteller, public_state
 
 app = FastAPI(title="AI Storyteller")
 _st: Storyteller | None = None
@@ -65,16 +65,17 @@ def get_chronicle(cid: str):
     ch = st().db.get_chronicle(cid)
     if not ch:
         raise HTTPException(404)
-    ch["events"] = st().db.get_events(cid)
-    ch.pop("notes", None)  # private to the Storyteller
-    return ch
+    events = [e for e in st().db.get_events(cid) if e["kind"] not in ("sheet", "scene")]  # legacy live events
+    return {
+        "id": ch["id"], "name": ch["name"], "campaign": ch["campaign"], "created": ch["created"],
+        **public_state(ch),  # scene + rendered sheet; private notes never leave the server
+        "events": events,
+    }
 
 
 def _sse(gen):
     for ev in gen:
-        if ev.get("kind") == "done":
-            ev["state"].pop("notes", None)
-        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
 
 
 @app.post("/api/chronicles/{cid}/begin")
@@ -103,7 +104,8 @@ def end_session(cid: str):
         "The player is ending the session now. Bring the current scene to a resting point in a short "
         "paragraph, then: call write_session_log with a full log of this session; update your 'recap' "
         "private note with what the next session needs; record durable NPC changes with "
-        "append_to_vault_note or set_character_state. Finish with one or two lines to the player about "
+        "append_to_vault_note or set_character_state; make sure the character's sheet and possessions are "
+        "up to date. Finish with one or two lines to the player about "
         "where things stand and what their character might be thinking about until next time."
     )
     return StreamingResponse(_sse(st().turn(cid, "[Session end]", operator_note=note)), media_type="text/event-stream")

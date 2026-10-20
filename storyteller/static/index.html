@@ -6,90 +6,203 @@
 <title>Storyteller</title>
 <style>
   :root {
-    --bg: #0f0d10; --panel: #171419; --panel-2: #1f1a22; --line: #2e2731;
-    --text: #e6dfe3; --muted: #9b8fa0; --accent: #a4162a; --accent-2: #d4a24c;
-    --ok: #4f9c6b; --warn: #c9803a; --danger: #c03a3a;
+    --bg: #0f0d10; --panel: #171419; --panel-2: #1f1a22; --line: #2e2731; --line-2: #3d3441;
+    --text: #e6dfe3; --muted: #9b8fa0; --faint: #5d5262; --accent: #a4162a; --accent-2: #d4a24c;
+    --ok: #4f9c6b; --warn: #c9803a; --danger: #d04545;
     --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
-  body { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 48px 1fr auto; height: 100vh; }
-  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr) auto; height: 100vh; height: 100dvh; }
+  header { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
   header h1 { font: 600 15px var(--serif); letter-spacing: .04em; margin: 0; color: var(--accent-2); }
-  header .scene { flex: 1; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .scene { flex: 1 1 200px; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   header .scene b { color: var(--text); font-weight: 500; }
   .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
   .pill.tense { border-color: var(--warn); color: var(--warn); }
   .pill.danger, .pill.frenzy { border-color: var(--danger); color: var(--danger); }
   select, button, input, textarea { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; }
+  select { padding: 5px 8px; max-width: 220px; }
   button { padding: 6px 12px; cursor: pointer; }
   button:hover { border-color: var(--accent-2); }
+  button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
   button.primary { background: var(--accent); border-color: var(--accent); }
+  button.ghost { background: none; }
   button:disabled { opacity: .5; cursor: default; }
-  main { overflow-y: auto; padding: 24px 32px 12px; scroll-behavior: smooth; }
+
+  /* ---------- transcript ---------- */
+  main { overflow-y: auto; padding: 24px 32px 24px; overflow-anchor: none; }
   .feed { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .turn { display: flex; flex-direction: column; gap: 16px; }
   .narration { font: 17px/1.6 var(--serif); white-space: pre-wrap; }
   .player { align-self: flex-end; max-width: 85%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px 12px 2px 12px; padding: 10px 14px; font-size: 15px; white-space: pre-wrap; }
   .dice { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent-2); border-radius: 6px; padding: 8px 12px; font-size: 13px; }
   .dice .label { color: var(--muted); }
-  .dice .d { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); font-family: var(--mono); font-size: 13px; }
+  .dice .d { display: inline-grid; place-items: center; width: 26px; height: 26px; margin-right: 4px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); font-family: var(--mono); font-size: 13px; }
   .dice .d.hit { border-color: var(--ok); color: var(--ok); }
   .dice .d.one { border-color: var(--danger); color: var(--danger); }
   .dice .d.ten { background: #2a2416; border-color: var(--accent-2); color: var(--accent-2); }
   .dice .res { font-weight: 600; }
   .dice .res.botch { color: var(--danger); }
   .sys, .tool { font-size: 12px; color: var(--muted); font-style: italic; }
-  .trait { font-size: 13px; color: var(--accent-2); }
+  .trait, .item { font-size: 13px; color: var(--accent-2); cursor: pointer; width: fit-content; }
+  .trait:hover, .item:hover { text-decoration: underline dotted; }
+  .dim { color: var(--muted); }
+  .why { color: var(--muted); font-style: italic; }
   .working { font-size: 12px; color: var(--muted); }
   .working::after { content: "…"; animation: blink 1s steps(3) infinite; }
   @keyframes blink { 50% { opacity: .3; } }
+  .empty { color: var(--muted); text-align: center; margin-top: 15vh; font: 16px var(--serif); }
+
+  /* ---------- side panel ---------- */
   aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 16px; font-size: 13px; }
-  aside h2 { font: 600 12px var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+  aside h2 { font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 20px 0 8px; }
   aside h2:first-child { margin-top: 0; }
-  .sheet .name { font: 600 18px var(--serif); }
-  .sheet .sub { color: var(--muted); margin-bottom: 10px; }
-  .track { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; border-bottom: 1px dashed var(--line); }
-  .track .v { font-family: var(--mono); }
-  .dots { color: var(--accent-2); letter-spacing: 1px; }
+  .who .name { font: 600 18px var(--serif); }
+  .who .sub { color: var(--muted); margin: 2px 0 10px; }
+  .trk { display: grid; grid-template-columns: 72px 1fr auto; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--line); }
+  .trk .v { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+  .boxes { display: flex; flex-wrap: wrap; gap: 3px; }
+  .bx { width: 11px; height: 11px; border: 1px solid var(--line-2); border-radius: 2px; }
+  .bx.blood { background: var(--accent); border-color: var(--accent); }
+  .bx.will { background: var(--accent-2); border-color: var(--accent-2); }
+  .bx.hurt { background: #6b5a70; border-color: #6b5a70; }
+  .onyou { list-style: none; padding: 0; margin: 0; }
+  .onyou li { padding: 4px 0; border-bottom: 1px dotted var(--line); display: flex; gap: 8px; align-items: baseline; }
+  .onyou li .q { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .onyou li .loc { margin-left: auto; color: var(--faint); font-size: 11px; text-transform: lowercase; white-space: nowrap; }
+  .side-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .muted { color: var(--muted); }
   .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
   .kv div:nth-child(even) { text-align: right; font-family: var(--mono); color: var(--muted); }
-  details summary { cursor: pointer; color: var(--muted); }
-  pre.raw { font-size: 11px; white-space: pre-wrap; color: var(--muted); }
-  footer { grid-column: 1 / 2; border-top: 1px solid var(--line); background: var(--panel); padding: 12px 32px; }
+
+  /* ---------- composer ---------- */
+  footer { grid-column: 1 / 2; position: relative; border-top: 1px solid var(--line); background: var(--panel); padding: 12px 32px; }
   .composer { max-width: 760px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
   textarea { flex: 1; min-height: 44px; max-height: 200px; padding: 10px 12px; resize: vertical; line-height: 1.4; }
   .hint { font-size: 11px; color: var(--muted); margin-top: 6px; text-align: center; }
-  .empty { color: var(--muted); text-align: center; margin-top: 15vh; font: 16px var(--serif); }
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-width: 360px; }
-  dialog::backdrop { background: rgba(0,0,0,.6); }
-  dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
-  dialog input, dialog select { width: 100%; padding: 8px; }
-  @media (max-width: 900px) { body { grid-template-columns: 1fr; } aside { display: none; } footer { grid-column: 1; } main { padding: 16px; } }
+  .jump { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); z-index: 5; border-radius: 999px; padding: 6px 14px; font-size: 12px; background: var(--panel-2); border-color: var(--line-2); box-shadow: 0 4px 16px rgba(0,0,0,.5); white-space: nowrap; }
+
+  /* ---------- dialogs ---------- */
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  dialog::backdrop { background: rgba(0,0,0,.65); }
+  #dlg { min-width: min(360px, calc(100vw - 32px)); }
+  #dlg label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+  #dlg input, #dlg select { width: 100%; padding: 8px; max-width: none; }
+
+  /* ---------- character sheet ---------- */
+  #sheetDlg { width: min(1060px, calc(100vw - 24px)); max-width: none; height: min(94vh, 1100px); max-height: none; padding: 0; overflow: hidden; }
+  #sheetDlg .wrap { display: flex; flex-direction: column; height: 100%; }
+  #sheetDlg .top { display: flex; align-items: flex-start; gap: 12px; padding: 18px 22px 0; }
+  #sheetDlg .top .t { flex: 1; min-width: 0; }
+  #sheetDlg .top .name { font: 600 24px var(--serif); line-height: 1.2; }
+  #sheetDlg .top .sub { color: var(--muted); margin-top: 2px; }
+  .tabs { display: flex; gap: 2px; padding: 10px 22px 0; border-bottom: 1px solid var(--line); }
+  .tab { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; color: var(--muted); }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-2); }
+  .sheet-body { overflow-y: auto; padding: 4px 22px 32px; flex: 1; }
+  .sec { margin-top: 22px; }
+  .sec > h3 { font: 600 11px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--accent-2); text-align: center; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
+  .sec > h3::before, .sec > h3::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+  .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 32px; }
+  .col h4 { font: italic 600 14px var(--serif); color: var(--muted); margin: 0 0 6px; text-align: center; }
+  .col + .col h4 { margin-top: 0; }
+  .col .blk + .blk { margin-top: 18px; }
+  .row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; font-size: 14px; }
+  .row .nm { flex: 1; min-width: 0; }
+  .row .nm small { display: block; color: var(--muted); font-size: 11.5px; font-style: italic; line-height: 1.3; }
+  .row.zero .nm { color: var(--faint); }
+  .dots { font-family: var(--mono); font-size: 13px; letter-spacing: 1px; color: var(--accent-2); white-space: nowrap; }
+  .dots .e { color: var(--line-2); }
+  .row.zero .dots { color: var(--line-2); }
+  .ident { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 32px; }
+  .ident div { border-bottom: 1px dotted var(--line); padding: 5px 0; display: flex; gap: 10px; font-size: 14px; }
+  .ident span { color: var(--muted); min-width: 92px; }
+  .track { margin-bottom: 14px; }
+  .track .lbl { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .track .lbl b { color: var(--text); font-weight: 500; }
+  .sqs { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sq { width: 16px; height: 16px; border: 1px solid var(--line-2); border-radius: 2px; }
+  .sq.blood { background: var(--accent); border-color: var(--accent); }
+  .sq.will { background: var(--accent-2); border-color: var(--accent-2); }
+  .hl { display: grid; grid-template-columns: 1fr auto 22px; gap: 10px; align-items: center; padding: 2px 0; font-size: 14px; }
+  .hl .pen { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .hl .mk { width: 20px; height: 20px; border: 1px solid var(--line-2); display: grid; place-items: center; font-family: var(--mono); font-size: 13px; border-radius: 2px; }
+  .hl.cur .nm { color: var(--accent-2); }
+  .mk.agg { color: var(--danger); border-color: var(--danger); }
+  .mk.leth { color: #e08a5b; border-color: #e08a5b; }
+  .mk.bash, .mk.gen { color: var(--text); border-color: var(--muted); }
+  .legend { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .mf { font-size: 14px; padding: 3px 0; display: flex; gap: 8px; }
+  .mf .pts { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .mf.flaw .pts { color: #c97b7b; }
+  .prose { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .extra + .extra { margin-top: 14px; }
+  .extra h4 { font: 600 12px var(--sans); color: var(--muted); margin: 0 0 4px; text-transform: uppercase; letter-spacing: .06em; }
+  .extra ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .inv-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .inv-group { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .inv-group h4 { margin: 0 0 8px; font: 600 12px var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--accent-2); display: flex; justify-content: space-between; }
+  .inv-group h4 span { color: var(--muted); font-weight: 400; }
+  .it { padding: 6px 0; border-top: 1px dotted var(--line); }
+  .it:first-of-type { border-top: none; }
+  .it .n { font-size: 14px; }
+  .it .n .q { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .it .d { font-size: 12px; color: var(--muted); }
+  .it .no { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 2px; }
+  .nothing { color: var(--muted); font: italic 15px var(--serif); padding: 30px 0; text-align: center; }
+
+  @media (max-width: 900px) {
+    body { grid-template-columns: minmax(0, 1fr); }
+    aside { display: none; }
+    footer { grid-column: 1; padding: 10px 16px; }
+    main { padding: 16px; }
+    .cols, .ident { grid-template-columns: minmax(0, 1fr); }
+    .col + .col { margin-top: 14px; }
+    #sheetDlg { width: 100vw; height: 100dvh; max-height: none; border-radius: 0; border: none; }
+    .sheet-body, #sheetDlg .top, .tabs { padding-left: 16px; padding-right: 16px; }
+  }
+  @media (max-width: 560px) {
+    header { padding: 8px 12px; gap: 6px 8px; }
+    header .scene, .hint, .wide { display: none; }
+    header h1 { font-size: 13px; }
+    header button, header select { padding: 4px 9px; font-size: 14px; }
+    header select { max-width: 150px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
 </style>
 </head>
 <body>
 <header>
   <h1>STORYTELLER</h1>
-  <select id="chronicles" title="Chronicle"></select>
-  <button id="new">New chronicle</button>
+  <select id="chronicles" title="Chronicle" aria-label="Chronicle"></select>
+  <button id="new" title="Start a new chronicle">New<span class="wide"> chronicle</span></button>
   <div class="scene" id="scene"></div>
   <span class="pill" id="tension" hidden></span>
+  <button id="sheetBtn" title="Your character sheet and possessions">Sheet</button>
   <button id="end" title="End the session: the Storyteller writes the log to the vault">End session</button>
 </header>
-<main><div class="feed" id="feed"><div class="empty">Create or choose a chronicle to begin.</div></div></main>
+<main id="main"><div class="feed" id="feed"><div class="empty">Create or choose a chronicle to begin.</div></div></main>
 <aside>
   <h2>Character</h2>
-  <div class="sheet" id="sheet"><div class="sub">No sheet yet.</div></div>
+  <div class="who" id="who"><div class="sub">No sheet yet.</div></div>
+  <h2>On you</h2>
+  <ul class="onyou" id="onyou"><li class="muted">Nothing recorded yet.</li></ul>
+  <div class="side-actions">
+    <button id="openSheet">Character sheet</button>
+    <button id="openInv" class="ghost">All possessions</button>
+  </div>
   <h2>Present</h2>
-  <div id="present" class="sub">—</div>
+  <div id="present" class="muted">—</div>
   <h2>Table</h2>
   <div class="kv" id="cfg"></div>
 </aside>
 <footer>
+  <button class="jump" id="jump" hidden>↓ More below</button>
   <div class="composer">
-    <textarea id="input" placeholder="What does your character do? (Use [brackets] to talk to the Storyteller out of character.)"></textarea>
+    <textarea id="input" aria-label="Your move" placeholder="What does your character do? (Use [brackets] to talk to the Storyteller out of character.)"></textarea>
     <button id="send" class="primary">Send</button>
   </div>
   <div class="hint">Enter to send · Shift+Enter for a new line</div>
@@ -98,18 +211,32 @@
 <dialog id="dlg">
   <form method="dialog">
     <strong>New chronicle</strong>
-    <label>Name</label><input id="dlgName" placeholder="e.g. Anja in New York" required>
-    <label>Campaign</label><select id="dlgCamp"></select>
+    <label for="dlgName">Name</label><input id="dlgName" placeholder="e.g. Anja in New York" required>
+    <label for="dlgCamp">Campaign</label><select id="dlgCamp"></select>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-      <button value="cancel">Cancel</button><button value="ok" class="primary">Create and begin</button>
+      <button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Create and begin</button>
     </div>
   </form>
 </dialog>
 
+<dialog id="sheetDlg" aria-labelledby="sheetName">
+  <div class="wrap">
+    <div class="top">
+      <div class="t"><div class="name" id="sheetName">Character</div><div class="sub" id="sheetSub"></div></div>
+      <button id="sheetClose" aria-label="Close sheet">Close</button>
+    </div>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="character" aria-selected="true">Character</button>
+      <button class="tab" role="tab" data-tab="possessions" aria-selected="false">Possessions</button>
+    </div>
+    <div class="sheet-body" id="sheetBody" role="tabpanel"></div>
+  </div>
+</dialog>
+
 <script>
 const $ = s => document.querySelector(s);
-const feed = $("#feed"), main = document.querySelector("main");
-let current = null, busy = false, cfg = null;
+const feed = $("#feed"), main = $("#main"), jump = $("#jump");
+let current = null, busy = false, cfg = null, view = null, turnEl = null, sheetTab = "character";
 
 async function api(path, opts) {
   const r = await fetch("/api" + path, Object.assign({headers: {"Content-Type": "application/json"}}, opts));
@@ -118,60 +245,238 @@ async function api(path, opts) {
 }
 function el(cls, html) { const d = document.createElement("div"); d.className = cls; if (html !== undefined) d.innerHTML = html; return d; }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function scrollDown() { main.scrollTop = main.scrollHeight; }
+function fmt(v) { return v !== null && typeof v === "object" ? JSON.stringify(v) : v; }
 
+/* ---------- scrolling: never follow the text; anchor each new turn at the top ---------- */
+function lastContent() {
+  const t = feed.lastElementChild;
+  if (!t) return null;
+  return t.classList.contains("turn") ? (t.lastElementChild || t) : t;
+}
+let jumpQueued = false;
+function changed() {
+  if (jumpQueued) return;
+  jumpQueued = true;
+  requestAnimationFrame(() => {
+    jumpQueued = false;
+    const last = lastContent();
+    const below = !!last && last.getBoundingClientRect().bottom > main.getBoundingClientRect().bottom + 4;
+    jump.hidden = !below;
+    jump.textContent = busy ? "↓ New text below" : "↓ More below";
+  });
+}
+function sizeLiveTurn() {
+  if (turnEl && turnEl.dataset.live) turnEl.style.minHeight = Math.max(0, main.clientHeight - 48) + "px";
+}
+function startTurn() {
+  if (turnEl) { turnEl.style.minHeight = ""; delete turnEl.dataset.live; }
+  feed.querySelector(".empty")?.remove();
+  turnEl = el("turn");
+  turnEl.dataset.live = "1";
+  feed.appendChild(turnEl);
+  sizeLiveTurn();
+  const top = main.scrollTop + turnEl.getBoundingClientRect().top - main.getBoundingClientRect().top - 16;
+  main.scrollTo({top, behavior: "smooth"});
+  return turnEl;
+}
+main.addEventListener("scroll", changed, {passive: true});
+window.addEventListener("resize", () => { sizeLiveTurn(); changed(); });
+jump.onclick = () => { const last = lastContent(); if (last) last.scrollIntoView({block: "end", behavior: "smooth"}); };
+
+/* ---------- transcript ---------- */
 function renderEvent(ev) {
-  if (ev.kind === "player") return el("player", esc(ev.text));
-  if (ev.kind === "narration") return el("narration", esc(ev.text));
-  if (ev.kind === "dice") {
-    const d = el("dice");
-    d.appendChild(el("label", esc(ev.label || "Roll")));
-    if (ev.hidden) { d.appendChild(el("res", "rolled behind the screen")); return d; }
-    const row = el("row");
-    (ev.dice || []).forEach(n => {
-      const s = document.createElement("span");
-      s.className = "d" + (n === 1 ? " one" : n === 10 ? " ten" : n >= ev.difficulty ? " hit" : "");
-      s.textContent = n; row.appendChild(s);
-    });
-    d.appendChild(row);
-    d.appendChild(el("label", `diff ${ev.difficulty}${ev.specialty ? " · specialty" : ""}${ev.willpower ? " · Willpower" : ""}`));
-    d.appendChild(el("res" + (ev.botch ? " botch" : ""), esc(ev.summary)));
-    return d;
+  let n = null;
+  if (ev.kind === "player") n = el("player", esc(ev.text));
+  else if (ev.kind === "narration") n = el("narration", esc(ev.text));
+  else if (ev.kind === "dice") {
+    n = el("dice");
+    n.appendChild(el("label", esc(ev.label || "Roll")));
+    if (ev.hidden) n.appendChild(el("res", "rolled behind the screen"));
+    else {
+      const row = el("row-dice");
+      (ev.dice || []).forEach(d => {
+        const s = document.createElement("span");
+        s.className = "d" + (d === 1 ? " one" : d === 10 ? " ten" : d >= ev.difficulty ? " hit" : "");
+        s.textContent = d; row.appendChild(s);
+      });
+      n.appendChild(row);
+      n.appendChild(el("label", `diff ${ev.difficulty}${ev.specialty ? " · specialty" : ""}${ev.willpower ? " · Willpower" : ""}`));
+      n.appendChild(el("res" + (ev.botch ? " botch" : ""), esc(ev.summary)));
+    }
   }
-  if (ev.kind === "trait") return el("trait", `${esc(ev.reason)} <span style="color:var(--muted)">(${esc(ev.path)}: ${esc(ev.old)} → ${esc(ev.new)})</span>`);
-  if (ev.kind === "tool") return el("tool", esc(ev.detail));
-  if (ev.kind === "system") return el("sys", esc(ev.text));
-  if (ev.kind === "error") return el("sys", "⚠ " + esc(ev.message));
-  return null;
+  else if (ev.kind === "trait") {
+    n = el("trait", `${esc(ev.reason)} <span class="dim">(${esc(ev.path)}: ${esc(fmt(ev.old))} → ${esc(fmt(ev.new))})</span>`);
+    n.title = "Open character sheet"; n.onclick = () => openSheet("character");
+  }
+  else if (ev.kind === "item") {
+    const q = ev.qty && ev.qty !== 1 ? ` ×${ev.qty}` : "";
+    const where = (ev.to ? esc(ev.to) : "") + (ev.detail ? ", " + esc(ev.detail) : "");
+    let s;
+    if (ev.op === "add") s = `+ ${esc(ev.name)}${q} <span class="dim">→ ${where}</span>`;
+    else if (ev.op === "remove") s = `− ${esc(ev.name)}${q}${ev.left != null ? ` <span class="dim">(${ev.left} left)</span>` : ""}`;
+    else if (ev.op === "move") s = `${esc(ev.name)}${q} <span class="dim">${esc(ev.from)} → ${where}</span>`;
+    else if (ev.op === "update") s = `${esc(ev.name)} <span class="dim">${esc(ev.changes || "updated")}</span>`;
+    else s = `${esc(ev.reason || "Possessions recorded")} <span class="dim">(${ev.count} item${ev.count === 1 ? "" : "s"})</span>`;
+    if (ev.op !== "set" && ev.reason) s += ` <span class="why">· ${esc(ev.reason)}</span>`;
+    n = el("item", s);
+    n.title = "Open possessions"; n.onclick = () => openSheet("possessions");
+  }
+  else if (ev.kind === "tool") n = el("tool", esc(ev.detail));
+  else if (ev.kind === "system") n = el("sys", esc(ev.text));
+  else if (ev.kind === "error") n = el("sys", "⚠ " + esc(ev.message));
+  if (n && ev.seq) n.dataset.seq = ev.seq;
+  return n;
 }
 
-function dots(n) { n = Number(n) || 0; return "●".repeat(Math.min(n, 10)) + "○".repeat(Math.max(0, 5 - n)); }
-function renderSheet(sh) {
-  const box = $("#sheet");
-  if (!sh || !Object.keys(sh).length) { box.innerHTML = '<div class="sub">No sheet yet.</div>'; return; }
-  let h = `<div class="name">${esc(sh.name || "Unnamed")}</div><div class="sub">${esc([sh.clan, sh.generation && sh.generation + "th gen", sh.concept].filter(Boolean).join(" · "))}</div>`;
-  const tracks = [["Blood", sh.blood, sh.blood_max], ["Willpower", sh.willpower, sh.willpower_max], ["Humanity", sh.humanity], ["Health", sh.health], ["XP", sh.experience]];
-  tracks.forEach(([k, v, m]) => { if (v !== undefined) h += `<div class="track"><span>${k}</span><span class="v">${esc(v)}${m !== undefined ? " / " + esc(m) : ""}</span></div>`; });
-  const group = (title, obj) => {
-    if (!obj || typeof obj !== "object") return "";
-    let s = `<h2>${title}</h2><div class="kv">`;
-    const walk = o => Object.entries(o).forEach(([k, v]) => {
-      if (v && typeof v === "object") walk(v);
-      else s += `<div>${esc(k)}</div><div>${typeof v === "number" ? `<span class="dots">${dots(v)}</span>` : esc(v)}</div>`;
-    });
-    walk(obj); return s + "</div>";
-  };
-  h += group("Attributes", sh.attributes) + group("Abilities", sh.abilities) + group("Disciplines", sh.disciplines) + group("Backgrounds", sh.backgrounds) + group("Virtues", sh.virtues);
-  h += `<details style="margin-top:10px"><summary>Full sheet</summary><pre class="raw">${esc(JSON.stringify(sh, null, 2))}</pre></details>`;
-  box.innerHTML = h;
+function renderTranscript(events) {
+  feed.innerHTML = ""; turnEl = null;
+  if (!events.length) { feed.appendChild(el("empty", "The table is set.")); return; }
+  for (const ev of events) {
+    if (!turnEl || (ev.kind === "player" && turnEl.childElementCount)) { turnEl = el("turn"); feed.appendChild(turnEl); }
+    const n = renderEvent(ev); if (n) turnEl.appendChild(n);
+  }
+  main.scrollTop = main.scrollHeight;
+  changed();
 }
+
+/* ---------- sheet: side panel ---------- */
+function boxes(cur, max, cls) {
+  cur = Number(cur) || 0; max = Math.max(Number(max) || 0, cur);
+  let h = "";
+  for (let i = 0; i < max; i++) h += `<span class="bx${i < cur ? " " + cls : ""}"></span>`;
+  return `<span class="boxes" aria-hidden="true">${h}</span>`;
+}
+function renderSide(v) {
+  const who = $("#who"), onyou = $("#onyou");
+  if (!v || v.empty) {
+    who.innerHTML = '<div class="sub">No sheet yet. The Storyteller builds it with you at the start.</div>';
+  } else {
+    let h = `<div class="name">${esc(v.name)}</div><div class="sub">${esc(v.subtitle)}</div>`;
+    if (v.blood) h += `<div class="trk"><span>Blood</span>${boxes(v.blood.current, v.blood.max, "blood")}<span class="v">${v.blood.current ?? "?"}/${v.blood.max ?? "?"}</span></div>`;
+    if (v.willpower) h += `<div class="trk"><span>Willpower</span>${boxes(v.willpower.current, v.willpower.max, "will")}<span class="v">${v.willpower.current ?? "?"}/${v.willpower.max ?? "?"}</span></div>`;
+    if (v.morality) h += `<div class="trk"><span>${esc(v.morality.label)}</span>${boxes(v.morality.rating, 10, "will")}<span class="v">${v.morality.rating ?? "?"}</span></div>`;
+    if (v.health) {
+      const dmg = v.health.boxes.filter(b => b.mark).length;
+      const pen = v.health.penalty ? ` (${v.health.penalty})` : "";
+      h += `<div class="trk"><span>Health</span>${boxes(dmg, 7, "hurt")}<span class="v">${esc(v.health.status)}${esc(pen)}</span></div>`;
+    }
+    who.innerHTML = h;
+  }
+  const carried = (v && v.inventory && v.inventory.carried) || [];
+  const items = carried.flatMap(g => g.items.map(it => ({...it, where: g.label})));
+  onyou.innerHTML = items.length
+    ? items.map(it => `<li><span>${esc(it.name)}</span>${it.qty > 1 ? `<span class="q">×${it.qty}</span>` : ""}<span class="loc">${esc(it.where)}</span></li>`).join("")
+    : '<li class="muted">Nothing recorded yet.</li>';
+}
+
+/* ---------- sheet: full dialog ---------- */
+function dots(r, max) {
+  if (r === null || r === undefined) return '<span class="dots">—</span>';
+  r = Math.max(0, Number(r) || 0); max = Math.max(max || 5, r);
+  return `<span class="dots" aria-label="${r} of ${max}">${"●".repeat(r)}<span class="e">${"○".repeat(max - r)}</span></span>`;
+}
+function traitRow(t, max, noteKey = "specialty") {
+  const note = t[noteKey];
+  return `<div class="row${t.rating ? "" : " zero"}"><span class="nm">${esc(t.name)}${note ? `<small>${esc(note)}</small>` : ""}</span>${dots(t.rating, max)}</div>`;
+}
+function col(title, inner) { return `<div class="col"><div class="blk"><h4>${esc(title)}</h4>${inner}</div></div>`; }
+function blk(title, inner) { return `<div class="blk"><h4>${esc(title)}</h4>${inner}</div>`; }
+function squares(cur, max, cls) {
+  cur = Number(cur) || 0; max = Math.max(Number(max) || 0, cur);
+  let h = ""; for (let i = 0; i < max; i++) h += `<span class="sq${i < cur ? " " + cls : ""}"></span>`;
+  return `<div class="sqs" aria-label="${cur} of ${max}">${h}</div>`;
+}
+function genericValue(v) {
+  if (v === null || v === undefined) return "";
+  if (Array.isArray(v)) return `<ul>${v.map(x => `<li>${typeof x === "object" ? esc(Object.entries(x).map(([k, y]) => `${k}: ${fmt(y)}`).join(" · ")) : esc(x)}</li>`).join("")}</ul>`;
+  if (typeof v === "object") return `<ul>${Object.entries(v).map(([k, x]) => `<li><span class="dim">${esc(k)}:</span> ${esc(fmt(x))}</li>`).join("")}</ul>`;
+  return `<div class="prose">${esc(v)}</div>`;
+}
+function characterTab(v) {
+  if (!v || v.empty) return '<div class="nothing">No character sheet yet. The Storyteller builds it with you during character creation.</div>';
+  const md = v.max_dots || 5;
+  let h = "";
+  if (v.identity.length) h += `<div class="sec"><div class="ident">${v.identity.map(f => `<div><span>${esc(f.label)}</span>${esc(f.value)}</div>`).join("")}</div></div>`;
+  h += `<div class="sec"><h3>Attributes</h3><div class="cols">${v.attributes.map(g => col(g.group, g.traits.map(t => traitRow(t, md)).join(""))).join("")}</div></div>`;
+  h += `<div class="sec"><h3>Abilities</h3><div class="cols">${v.abilities.map(g => col(g.group, g.traits.map(t => traitRow(t, md)).join(""))).join("")}</div></div>`;
+  const disc = v.disciplines.map(t => traitRow(t, md, "note")).join("") || '<div class="muted">None</div>';
+  const paths = v.paths.length ? blk("Paths", v.paths.map(t => traitRow(t, md, "note")).join("")) : "";
+  const rituals = v.rituals.length ? blk("Rituals", v.rituals.map(t => `<div class="row"><span class="nm">${esc(t.name)}${t.note ? `<small>${esc(t.note)}</small>` : ""}</span>${t.rating != null ? `<span class="dots">Lv ${t.rating}</span>` : ""}</div>`).join("")) : "";
+  h += `<div class="sec"><h3>Advantages</h3><div class="cols">`
+     + `<div class="col">${blk("Disciplines", disc)}${paths}${rituals}</div>`
+     + col("Backgrounds", v.backgrounds.map(t => traitRow(t, 5, "note")).join("") || '<div class="muted">None</div>')
+     + col("Virtues", v.virtues.map(t => traitRow(t, 5, "note")).join("") || '<div class="muted">None</div>')
+     + `</div></div>`;
+  // status row
+  const mf = v.merits_flaws.length
+    ? v.merits_flaws.map(m => `<div class="mf ${m.kind || ""}"><span>${esc(m.name)}${m.note ? `<span class="dim"> · ${esc(m.note)}</span>` : ""}</span><span class="pts">${m.points != null ? `${m.points} pt` : ""}${m.kind ? " " + esc(m.kind) : ""}</span></div>`).join("")
+    : '<div class="muted">None</div>';
+  let left = blk("Merits & Flaws", mf);
+  if (v.weakness) left += blk("Weakness", `<div class="prose">${esc(v.weakness)}</div>`);
+  let mid = "";
+  if (v.morality) mid += `<div class="track"><div class="lbl"><span>${esc(v.morality.label)}</span><b>${v.morality.rating ?? "?"}</b></div>${dots(v.morality.rating, 10)}</div>`;
+  if (v.willpower) mid += `<div class="track"><div class="lbl"><span>Willpower</span><b>${v.willpower.current ?? "?"} / ${v.willpower.max ?? "?"}</b></div>${dots(v.willpower.max, 10)}<div style="height:6px"></div>${squares(v.willpower.current, v.willpower.max, "will")}</div>`;
+  if (v.blood) mid += `<div class="track"><div class="lbl"><span>Blood pool</span><b>${v.blood.current ?? "?"} / ${v.blood.max ?? "?"}</b></div>${squares(v.blood.current, v.blood.max, "blood")}${v.blood.per_turn ? `<div class="legend">Spend up to ${v.blood.per_turn} per turn</div>` : ""}</div>`;
+  let right = "";
+  if (v.health) {
+    const marks = {"*": "agg", "X": "leth", "/": "bash", "•": "gen"};
+    const filled = v.health.boxes.filter(b => b.mark).length;
+    right += blk("Health", v.health.boxes.map((b, i) => `<div class="hl${filled && i === filled - 1 ? " cur" : ""}"><span class="nm">${esc(b.label)}</span><span class="pen">${b.penalty === null ? "" : b.penalty === 0 ? "" : b.penalty}</span><span class="mk ${marks[b.mark] || ""}">${esc(b.mark === "•" ? "/" : b.mark)}</span></div>`).join("")
+      + `<div class="legend">${esc(v.health.status)}${v.health.penalty ? ` · ${v.health.penalty} dice` : ""}${v.health.note && v.health.note !== v.health.status ? ` · ${esc(v.health.note)}` : ""}</div><div class="legend">/ bashing &nbsp;X lethal &nbsp;* aggravated</div>`);
+  }
+  if (v.experience) {
+    const e = v.experience;
+    right += blk("Experience", e.text ? `<div class="prose">${esc(e.text)}</div>` : `<div class="row"><span class="nm">Unspent</span><span class="dots">${e.unspent ?? "?"}</span></div>${e.total != null ? `<div class="row"><span class="nm">Total earned</span><span class="dots">${e.total}</span></div>` : ""}`);
+  }
+  h += `<div class="sec"><h3>Status</h3><div class="cols"><div class="col">${left}</div><div class="col">${mid || '<div class="muted">—</div>'}</div><div class="col">${right}</div></div></div>`;
+  if (v.extras.length) h += `<div class="sec"><h3>Notes</h3>${v.extras.map(x => `<div class="extra">${x.label.toLowerCase() === "notes" && v.extras.length === 1 ? "" : `<h4>${esc(x.label)}</h4>`}${genericValue(x.value)}</div>`).join("")}</div>`;
+  return h;
+}
+function possessionsTab(v) {
+  const inv = (v && v.inventory) || {carried: [], stashed: [], count: 0};
+  if (!inv.count) return '<div class="nothing">Nothing recorded yet. The Storyteller writes down what you carry as the story establishes it. You can also ask in [brackets] for it to take stock.</div>';
+  const group = g => `<div class="inv-group"><h4>${esc(g.label)}<span>${g.items.length}</span></h4>${g.items.map(it => `<div class="it"><div class="n">${esc(it.name)}${it.qty > 1 ? ` <span class="q">×${it.qty}</span>` : ""}</div>${it.detail ? `<div class="d">${esc(it.detail)}</div>` : ""}${it.notes ? `<div class="no">${esc(it.notes)}</div>` : ""}</div>`).join("")}</div>`;
+  let h = "";
+  h += `<div class="sec"><h3>On you</h3>${inv.carried.length ? `<div class="inv-groups">${inv.carried.map(group).join("")}</div>` : '<div class="nothing">Empty-handed.</div>'}</div>`;
+  if (inv.stashed.length) h += `<div class="sec"><h3>Elsewhere</h3><div class="inv-groups">${inv.stashed.map(group).join("")}</div></div>`;
+  return h;
+}
+function renderSheetDlg() {
+  const v = view;
+  $("#sheetName").textContent = v && !v.empty ? v.name : "Character";
+  $("#sheetSub").textContent = v && !v.empty ? v.subtitle : "";
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", String(t.dataset.tab === sheetTab)));
+  const body = $("#sheetBody"), keep = body.scrollTop;
+  body.innerHTML = sheetTab === "possessions" ? possessionsTab(v) : characterTab(v);
+  body.scrollTop = keep;
+}
+function openSheet(tab) {
+  const dlg = $("#sheetDlg");
+  const switching = tab && tab !== sheetTab;
+  if (tab) sheetTab = tab;
+  renderSheetDlg();
+  if (switching) $("#sheetBody").scrollTop = 0;
+  if (!dlg.open) dlg.showModal();
+}
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => { sheetTab = t.dataset.tab; renderSheetDlg(); $("#sheetBody").scrollTop = 0; });
+$("#sheetClose").onclick = () => $("#sheetDlg").close();
+$("#sheetDlg").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$("#sheetBtn").onclick = () => openSheet("character");
+$("#openSheet").onclick = () => openSheet("character");
+$("#openInv").onclick = () => openSheet("possessions");
+
 function renderScene(sc) {
   sc = sc || {};
   $("#scene").innerHTML = sc.location ? `<b>${esc(sc.location)}</b> · ${esc(sc.time || "")}${sc.note ? " · " + esc(sc.note) : ""}` : "";
   const t = $("#tension"); t.hidden = !sc.tension; t.textContent = sc.tension || ""; t.className = "pill " + (sc.tension || "");
   $("#present").textContent = (sc.present && sc.present.length) ? sc.present.join(", ") : "—";
 }
+function applyState(st) {
+  view = st.view; renderSide(view); renderScene(st.scene);
+  if ($("#sheetDlg").open) renderSheetDlg();
+}
 
+/* ---------- chronicles ---------- */
 async function loadChronicles() {
   const list = await (await api("/chronicles")).json();
   const sel = $("#chronicles");
@@ -180,16 +485,19 @@ async function loadChronicles() {
   return list;
 }
 async function openChronicle(id) {
-  current = id; localStorage.setItem("st:last", id);
+  current = id;
+  try { localStorage.setItem("st:last", id); } catch (e) {}
   const ch = await (await api("/chronicles/" + id)).json();
-  feed.innerHTML = "";
-  ch.events.forEach(ev => { const n = renderEvent(ev); if (n) feed.appendChild(n); });
-  renderSheet(ch.sheet); renderScene(ch.scene); scrollDown();
+  renderTranscript(ch.events);
+  applyState(ch);
 }
 
 async function stream(path, body) {
-  if (busy) return; busy = true; $("#send").disabled = true; $("#end").disabled = true;
+  if (busy) return;
+  busy = true; $("#send").disabled = true; $("#end").disabled = true;
+  const t = startTurn();
   let live = null, working = null;
+  const add = n => { if (n) { t.appendChild(n); changed(); } };
   try {
     const r = await api(path, {method: "POST", body: body ? JSON.stringify(body) : undefined});
     const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
@@ -202,37 +510,45 @@ async function stream(path, body) {
         const ev = JSON.parse(chunk.slice(6));
         if (ev.kind === "delta") {
           if (working) { working.remove(); working = null; }
-          if (!live) { live = el("narration", ""); feed.appendChild(live); }
-          live.textContent += ev.text;
+          if (!live) { live = el("narration", ""); add(live); }
+          live.textContent += ev.text; changed();
         } else if (ev.kind === "working") {
-          if (!working) { working = el("working", "the Storyteller consults the books"); feed.appendChild(working); }
+          if (!working) { working = el("working", "the Storyteller consults the books"); add(working); }
         } else if (ev.kind === "narration") {
-          if (live) { live.textContent = ev.text; live = null; }
+          if (live) { live.textContent = ev.text; live = null; } else add(renderEvent(ev));
+        } else if (ev.kind === "state") {
+          applyState(ev);
         } else if (ev.kind === "done") {
-          if (working) working.remove();
-          renderSheet(ev.state.sheet); renderScene(ev.state.scene);
-        } else {
-          if (ev.kind === "sheet") renderSheet(ev.sheet);
-          else if (ev.kind === "scene") renderScene(ev.scene);
-          else { const n = renderEvent(ev); if (n) feed.appendChild(n); }
+          if (working) { working.remove(); working = null; }
+          applyState(ev);
+        } else if (ev.kind === "error") {
+          if (working) { working.remove(); working = null; }
+          if (ev.unsent_seq) t.querySelector(`[data-seq="${ev.unsent_seq}"]`)?.remove();
+          if (ev.restore_text && !$("#input").value.trim()) $("#input").value = ev.restore_text;
+          add(renderEvent(ev));
+          if (ev.restore_text) add(el("sys", "Your message was not sent. It is back in the box below."));
           live = null;
+        } else {
+          if (working) { working.remove(); working = null; }
+          add(renderEvent(ev)); live = null;
         }
-        scrollDown();
       }
     }
   } catch (e) {
-    feed.appendChild(el("sys", "⚠ " + esc(e.message)));
+    add(el("sys", "⚠ " + esc(e.message)));
   } finally {
-    busy = false; $("#send").disabled = false; $("#end").disabled = false; $("#input").focus();
+    busy = false; $("#send").disabled = false; $("#end").disabled = false;
+    $("#input").focus({preventScroll: true});
+    changed();
   }
 }
 
 $("#send").onclick = () => {
-  const t = $("#input").value.trim(); if (!t || !current) return;
+  const t = $("#input").value.trim(); if (!t || !current || busy) return;
   $("#input").value = ""; stream(`/chronicles/${current}/turn`, {text: t});
 };
-$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#send").click(); } });
-$("#end").onclick = () => { if (current && confirm("End the session? The Storyteller will write the log to your vault.")) stream(`/chronicles/${current}/end_session`); };
+$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#send").click(); } });
+$("#end").onclick = () => { if (current && !busy && confirm("End the session? The Storyteller will write the log to your vault.")) stream(`/chronicles/${current}/end_session`); };
 $("#chronicles").onchange = e => e.target.value && openChronicle(e.target.value);
 $("#new").onclick = () => { $("#dlgName").value = ""; $("#dlg").showModal(); };
 $("#dlg").addEventListener("close", async () => {
@@ -247,7 +563,7 @@ $("#dlg").addEventListener("close", async () => {
   $("#cfg").innerHTML = `<div>model</div><div>${esc(cfg.model)}</div><div>effort</div><div>${esc(cfg.effort)}</div><div>vault</div><div title="${esc(cfg.vault)}">${esc(cfg.vault.split(/[\\/]/).pop())}</div>`;
   $("#dlgCamp").innerHTML = Object.entries(cfg.campaigns).map(([k, v]) => `<option value="${k}" ${k === cfg.default_campaign ? "selected" : ""}>${esc(v)}</option>`).join("");
   const list = await loadChronicles();
-  const last = localStorage.getItem("st:last");
+  let last = null; try { last = localStorage.getItem("st:last"); } catch (e) {}
   const pick = list.find(c => c.id === last) || list[0];
   if (pick) { $("#chronicles").value = pick.id; openChronicle(pick.id); }
 })();
