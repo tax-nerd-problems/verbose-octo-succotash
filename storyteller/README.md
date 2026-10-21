@@ -20,6 +20,7 @@ Open http://localhost:8000, click **New chronicle**, and the Storyteller opens w
 - **Your sheet.** The **Sheet** button (top right) opens a full V20 character sheet: attributes, abilities, disciplines, backgrounds, virtues, merits and flaws, Humanity, Willpower, blood pool, health track, and experience. It updates live as the Storyteller changes things.
 - **What you're carrying.** The side panel lists what's on you right now, and the sheet's **Possessions** tab shows everything: in hand, worn, pockets, bag, and what's stashed at your haven, in a car, or elsewhere. The Storyteller records every change as the story makes it. Click any gold line in the transcript to jump to the right tab.
 - **Reading at your own pace.** When you send a move, your message moves to the top of the screen and the reply appears beneath it. The page never scrolls by itself while the Storyteller writes. If the reply runs past the bottom, a **New text below** button appears; scroll whenever you like.
+- **Memory meter.** The side panel shows how much of the chronicle the model is holding in its head right now (its context), when it will next be condensed, what the last turn cost in tokens and how much of it came from cache, and a running cost estimate for the chronicle. The estimate uses the list prices in `config.py`; the Usage page in the Anthropic Console is the real bill.
 
 ## How it works
 
@@ -28,7 +29,8 @@ Open http://localhost:8000, click **New chronicle**, and the Storyteller opens w
 - **Honest mechanics.** Dice are rolled by `roll_dice` (V20 rules, 1s cancel, botches, specialties, Willpower), never by the model. The character sheet changes only through `set_sheet` and `update_trait`, and possessions only through `set_inventory` and `update_inventory`. Hidden rolls show the player only "rolled behind the screen".
 - **Memory.** Chat history, the sheet, possessions, the scene, and the Storyteller's private notes live in `storyteller/chronicles.db` (SQLite, gitignored). Private notes hold NPC agendas, clocks, secrets, and a recap.
 - **Write-back.** "End session" makes the Storyteller write a log to `Sessions/` in the vault, append dated chronicle notes to NPC notes under a `## Chronicle Notes (AI Storyteller)` heading, and update `char state` in frontmatter when someone dies or disappears. It never deletes or rewrites your original text.
-- **Long campaigns.** Server-side compaction (beta) summarizes old history automatically when the context grows large.
+- **Caching.** The fixed prefix and the growing conversation are both cached on Anthropic's side with a one-hour lifetime, so a turn re-reads the previous one from cache at a small fraction of the price. A break longer than an hour means the next turn rebuilds the cache once.
+- **Long campaigns.** When the context reaches 150K tokens, and at the end of every session, the app asks the API to condense the older turns into one summary (server-side compaction, beta). The summarizer is told exactly what a chronicle needs to keep (`prompts/compaction.md`): NPCs and their attitudes, boons and debts, clues, open threads, the in-fiction calendar, rolls that mattered, secrets, and your out-of-character preferences. The last two turns stay word for word. The sheet, possessions, scene, and the Storyteller's private notes live outside the conversation and are untouched, and on the next turn the Storyteller is shown its notes in full so it picks the thread back up. You can also condense at any time from the side panel.
 
 ## Updating without losing your chronicle
 
@@ -51,7 +53,11 @@ Environment variables, all optional:
 | `ST_EFFORT` | `medium` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `ST_MAX_TOKENS` | `8000` | Max output tokens per response |
 | `ST_CAMPAIGN` | `campaign1` | Default campaign (see `config.py`) |
-| `ST_COMPACTION` | `1` | Set `0` to disable server-side compaction |
+| `ST_CACHE_TTL` | `1h` | Cache lifetime: `1h`, or `5m` if your turns always come less than five minutes apart |
+| `ST_COMPACTION` | `1` | Set `0` to never condense (the context then grows until the model's 1M-token limit) |
+| `ST_COMPACT_AT` | `150000` | Condense when the context reaches this many tokens |
+| `ST_COMPACT_AT_SESSION_END` | `1` | Set `0` to skip condensing when you click End session |
+| `ST_KEEP_RECENT_TURNS` | `2` | Turns kept word for word after condensing |
 | `ST_FALLBACKS` | `1` | Set `0` to disable server-side refusal fallbacks |
 | `ST_SESSION_DIR` | `Sessions` | Vault folder for session logs |
 | `VAULT_DIR` | parent folder | Vault root |
@@ -61,7 +67,7 @@ To add a campaign, add an entry to `CAMPAIGNS` in `config.py` with the core file
 
 ## Tests
 
-Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, the character sheet display (including older sheet shapes), possessions, upgrading an older database, and the turn loop against a scripted fake client:
+Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, the character sheet display (including older sheet shapes), possessions, upgrading an older database, the token meter, memory condensing and the recap that follows it, and the turn loop against a scripted fake client:
 
 ```bash
 python -m unittest storyteller.tests.test_offline -v

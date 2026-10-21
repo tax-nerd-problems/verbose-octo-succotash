@@ -77,6 +77,14 @@
   .muted { color: var(--muted); }
   .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
   .kv div:nth-child(even) { text-align: right; font-family: var(--mono); color: var(--muted); }
+  .meter .bar { height: 6px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; margin: 6px 0 4px; }
+  .meter .fill { height: 100%; background: var(--accent-2); transition: width .4s; }
+  .meter .fill.high { background: var(--warn); }
+  .meter .fill.full { background: var(--danger); }
+  .meter .lbl { display: flex; justify-content: space-between; font-size: 12px; }
+  .meter .lbl b { font-weight: 500; }
+  .meter .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .meter button { margin-top: 8px; width: 100%; font-size: 12px; padding: 4px 8px; }
 
   /* ---------- composer ---------- */
   footer { grid-column: 1 / 2; position: relative; border-top: 1px solid var(--line); background: var(--panel); padding: 12px 32px; }
@@ -196,6 +204,8 @@
   </div>
   <h2>Present</h2>
   <div id="present" class="muted">—</div>
+  <h2>Memory</h2>
+  <div class="meter" id="meter"><div class="sub">No turns yet.</div></div>
   <h2>Table</h2>
   <div class="kv" id="cfg"></div>
 </aside>
@@ -322,7 +332,7 @@ function renderEvent(ev) {
     n.title = "Open possessions"; n.onclick = () => openSheet("possessions");
   }
   else if (ev.kind === "tool") n = el("tool", esc(ev.detail));
-  else if (ev.kind === "system") n = el("sys", esc(ev.text));
+  else if (ev.kind === "system" || ev.kind === "memory") n = el("sys", esc(ev.text));
   else if (ev.kind === "error") n = el("sys", "⚠ " + esc(ev.message));
   if (n && ev.seq) n.dataset.seq = ev.seq;
   return n;
@@ -471,8 +481,28 @@ function renderScene(sc) {
   const t = $("#tension"); t.hidden = !sc.tension; t.textContent = sc.tension || ""; t.className = "pill " + (sc.tension || "");
   $("#present").textContent = (sc.present && sc.present.length) ? sc.present.join(", ") : "—";
 }
+function k(n) { n = Number(n) || 0; return n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "K" : String(n); }
+function money(x) { return x == null ? null : (x < 0.1 ? "$" + x.toFixed(3) : "$" + x.toFixed(2)); }
+function renderMeter(m) {
+  const box = $("#meter");
+  if (!m || !m.total || !m.total.requests) { box.innerHTML = '<div class="sub">No turns yet.</div>'; return; }
+  const limit = m.limit || m.hard_limit, pct = Math.min(100, Math.round(100 * m.context / limit));
+  const cls = pct >= 95 ? " full" : pct >= 75 ? " high" : "";
+  let h = `<div class="lbl"><span>Context</span><b>${m.estimated ? "~" : ""}${k(m.context)} / ${k(limit)}</b></div>`;
+  h += `<div class="bar"><div class="fill${cls}" style="width:${pct}%"></div></div>`;
+  h += `<div class="sub">${m.limit ? "Condensed into a summary at " + k(m.limit) + " and at session end" : "Condensing is off"}${m.total.compactions ? ` · condensed ${m.total.compactions}×` : ""}</div>`;
+  if (m.turn && m.turn.requests) {
+    const cached = m.turn.cached == null ? "" : `, ${Math.round(m.turn.cached * 100)}% from cache`;
+    h += `<div class="sub">Last turn: ${k(m.turn.input)} in${cached} · ${k(m.turn.output)} out</div>`;
+  }
+  const t = m.total, tin = t.input + t.cache_read + t.cache_write_5m + t.cache_write_1h;
+  h += `<div class="sub">Chronicle: ${k(tin)} in · ${k(t.output)} out${m.cost != null ? ` · about ${money(m.cost)}` : ""}</div>`;
+  h += `<button id="condense" class="ghost" title="Ask the API to summarize the chronicle so far">Condense now</button>`;
+  box.innerHTML = h;
+  $("#condense").onclick = () => { if (current && !busy && confirm("Condense the chronicle's memory now? Earlier turns become a summary; your sheet, possessions and the Storyteller's notes are unaffected.")) stream(`/chronicles/${current}/compact`, null, {anchor: false}); };
+}
 function applyState(st) {
-  view = st.view; renderSide(view); renderScene(st.scene);
+  view = st.view; renderSide(view); renderScene(st.scene); renderMeter(st.meter);
   if ($("#sheetDlg").open) renderSheetDlg();
 }
 
@@ -492,10 +522,11 @@ async function openChronicle(id) {
   applyState(ch);
 }
 
-async function stream(path, body) {
+async function stream(path, body, opts = {}) {
   if (busy) return;
-  busy = true; $("#send").disabled = true; $("#end").disabled = true;
-  const t = startTurn();
+  busy = true; $("#send").disabled = true; $("#end").disabled = true; const cb = $("#condense"); if (cb) cb.disabled = true;
+  // A player's move anchors a new turn at the top of the screen; housekeeping (condensing) just appends.
+  const t = opts.anchor === false ? (turnEl || startTurn()) : startTurn();
   let live = null, working = null;
   const add = n => { if (n) { t.appendChild(n); changed(); } };
   try {

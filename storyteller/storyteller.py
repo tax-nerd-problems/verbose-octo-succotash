@@ -10,7 +10,7 @@ from typing import Iterator
 
 import anthropic
 
-from . import config
+from . import config, meter
 from .db import DB
 from .sheet import sheet_view
 from .tools import TOOL_SPECS, ToolContext, _item_line
@@ -44,18 +44,29 @@ def build_system(campaign: str, vault_root: Path | None = None) -> list[dict]:
     parts.append("# The chronicle bible\n\n" + "\n\n".join(docs))
     parts.append(_load(Path(camp["premise"])))
     blocks = [{"type": "text", "text": t} for t in parts]
-    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    blocks[-1]["cache_control"] = cache_marker()
     return blocks
 
 
+def cache_marker() -> dict:
+    """The prefix and the conversation tail use the same lifetime (longer lifetimes must come first)."""
+    return {"type": "ephemeral", "ttl": "1h"} if config.CACHE_TTL == "1h" else {"type": "ephemeral"}
+
+
 def prefix_hash(system: list[dict], tools: list[dict]) -> str:
-    blob = json.dumps({"system": system, "tools": tools}, sort_keys=True, ensure_ascii=False)
+    # cache_control markers are not part of what thinking blocks are bound to.
+    plain = [{k: v for k, v in b.items() if k != "cache_control"} for b in system]
+    blob = json.dumps({"system": plain, "tools": tools}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def public_state(ch: dict) -> dict:
     """What the browser is allowed to see: never the Storyteller's private notes."""
-    return {"scene": ch.get("scene") or {}, "view": sheet_view(ch.get("sheet"), ch.get("inventory"))}
+    return {
+        "scene": ch.get("scene") or {},
+        "view": sheet_view(ch.get("sheet"), ch.get("inventory")),
+        "meter": meter.view(ch.get("usage") or {}),
+    }
 
 
 def _state_message(ch: dict) -> str:
@@ -63,12 +74,13 @@ def _state_message(ch: dict) -> str:
     scene = ch.get("scene") or {}
     sheet = ch.get("sheet") or {}
     items = (ch.get("inventory") or {}).get("items", [])
+    notes = ch.get("notes") or {}
     keys = ("name", "clan", "generation", "blood", "blood_max", "willpower", "willpower_max", "humanity", "path", "health")
     brief = {
         "scene": scene,
         "sheet_summary": {k: sheet.get(k) for k in keys if k in sheet} if sheet else "no sheet yet",
         "possessions": [_item_line(it) for it in items] or "none recorded",
-        "private_note_keys": sorted((ch.get("notes") or {}).keys()),
+        "private_note_keys": sorted(notes.keys()),
     }
     text = "Storyteller screen (current state, not visible to the player): " + json.dumps(brief, ensure_ascii=False)
     if sheet and not items:
@@ -76,7 +88,33 @@ def _state_message(ch: dict) -> str:
             "\nThe character's possessions are not recorded yet. At the next natural pause, record what they "
             "carry and own, based on the story so far, with set_inventory."
         )
+    if ch.get("recap_due"):
+        text += (
+            "\n\nThe chronicle's earlier turns have been condensed into the summary at the start of this "
+            "conversation. Your private notes, in full, so you can pick the thread back up:\n"
+            + (json.dumps(notes, ensure_ascii=False, indent=1) if notes else "(no private notes yet)")
+            + "\nReread them before you continue. Trust the summary and these notes over your memory of details."
+        )
     return text
+
+
+COMPACTION_BETA = "compact-2026-09-04"
+
+
+def _has_summary(messages: list[dict]) -> bool:
+    """True when the history starts with a compaction (summary) block."""
+    if not messages:
+        return False
+    c = messages[0].get("content")
+    return isinstance(c, list) and bool(c) and isinstance(c[0], dict) and c[0].get("type") == "compaction"
+
+
+def _is_player_message(m: dict) -> bool:
+    """A user message typed by the player (or the app's opening line), not tool results or a summary."""
+    c = m.get("content")
+    if isinstance(c, str):
+        return True
+    return bool(c) and all(isinstance(b, dict) and b.get("type") == "text" for b in c)
 
 
 def _is_thinking_binding_error(e: anthropic.APIStatusError) -> bool:
@@ -109,17 +147,116 @@ class Storyteller:
             tools=TOOL_SPECS,
             messages=messages,
             output_config={"effort": config.EFFORT},
+            # Automatic caching of the conversation tail: the breakpoint moves forward
+            # as the chronicle grows, so each request re-reads the previous one from cache.
+            cache_control=cache_marker(),
         )
         betas = []
-        if config.ENABLE_COMPACTION:
-            betas.append("compact-2026-01-12")
-            kw["context_management"] = {"edits": [{"type": "compact_20260112"}]}
+        if _has_summary(messages):
+            betas.append(COMPACTION_BETA)  # required on every request that carries the signed block
         if config.ENABLE_FALLBACKS:
             betas.append("server-side-fallback-2026-07-01")
             kw["fallbacks"] = "default"
         if betas:
             kw["betas"] = betas
         return kw
+
+    def _note_usage(self, chronicle_id: str, response_usage) -> None:
+        ch = self.db.get_chronicle(chronicle_id)
+        self.db.set_usage(chronicle_id, meter.record(ch.get("usage") or {}, response_usage))
+
+    # ---------- memory condensing ----------
+    @staticmethod
+    def _split_for_compaction(messages: list[dict], keep_turns: int) -> tuple[list[dict], list[dict]]:
+        """Split the history into (older turns to summarize, recent turns to keep word for word).
+
+        A kept turn starts at a player message (a user message that is not a tool
+        result) and runs to the end; the Storyteller-screen system message that follows
+        a player message stays with it. Compaction blocks already at the front stay
+        in the summarized part, so the new summary covers them too.
+        """
+        if keep_turns <= 0:
+            return messages, []
+        starts = [i for i, m in enumerate(messages) if m["role"] == "user" and _is_player_message(m)]
+        if len(starts) <= keep_turns:
+            return [], messages  # nothing old enough to summarize
+        cut = starts[-keep_turns]
+        return messages[:cut], messages[cut:]
+
+    def compact(self, chronicle_id: str, reason: str = "requested", final: bool = True) -> Iterator[Event]:
+        """Ask the API to condense the older turns into one summary block.
+
+        The sheet, possessions, scene and private notes live outside the conversation
+        and are unaffected. The next turn shows the Storyteller its notes in full.
+        """
+        ch = self.db.get_chronicle(chronicle_id)
+        if not ch:
+            yield {"kind": "error", "message": "no such chronicle"}
+            return
+        messages = self.db.get_messages(chronicle_id)
+        if messages and messages[-1]["role"] != "assistant":
+            yield self.db.append_event(chronicle_id, "memory", {"text": "Memory not condensed: the last turn did not finish cleanly. Send another message first."})
+            if final:
+                yield {"kind": "done", **public_state(ch)}
+            return
+        older, recent = self._split_for_compaction(messages, config.KEEP_RECENT_TURNS)
+        if not older or not any(m["role"] == "assistant" for m in older):
+            yield self.db.append_event(chronicle_id, "memory", {"text": "Memory not condensed: there is nothing old enough to summarize yet."})
+            if final:
+                yield {"kind": "done", **public_state(ch)}
+            return
+        yield {"kind": "working", "name": "compaction"}
+        kw = dict(
+            model=config.MODEL,
+            max_tokens=16000,
+            system=self.system_for(ch["campaign"]),
+            tools=TOOL_SPECS,
+            messages=older,
+            compaction={"type": "summarize", "instructions": _load(config.APP_DIR / "prompts" / "compaction.md")},
+            betas=[COMPACTION_BETA],
+        )
+        try:
+            response = self.client.beta.messages.create(**kw)
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
+            msg = f"API error {e.status_code}: {e.message}" if isinstance(e, anthropic.APIStatusError) else f"connection error: {e}"
+            yield self.db.append_event(chronicle_id, "memory", {"text": f"Memory not condensed ({msg}). Play continues with the full history."})
+            if final:
+                yield {"kind": "done", **public_state(ch)}
+            return
+        usage = self.db.get_chronicle(chronicle_id).get("usage") or {}
+        before = usage.get("context", 0)
+        block = next((b for b in response.content if b.type == "compaction"), None)
+        if block is None or not getattr(block, "content", None):
+            # A failed summary is a normal 200 with empty content and a telling stop reason.
+            self.db.set_usage(chronicle_id, meter.after_compaction(usage, getattr(response, "usage", None)))
+            why = {
+                "max_tokens": "the summary ran past its length limit",
+                "model_context_window_exceeded": "the history no longer fits the model's context window; reduce ST_KEEP_RECENT_TURNS or ST_COMPACT_AT",
+                "tool_use": "the model tried to call a tool instead of writing the summary",
+                "refusal": "the model declined to write the summary",
+            }.get(getattr(response, "stop_reason", None), f"the API returned no summary (stop reason: {getattr(response, 'stop_reason', None)})")
+            yield self.db.append_event(chronicle_id, "memory", {"text": f"Memory not condensed: {why}. Play continues with the full history."})
+            yield {"kind": "state", **public_state(self.db.get_chronicle(chronicle_id))}
+            if final:
+                yield {"kind": "done", **public_state(self.db.get_chronicle(chronicle_id))}
+            return
+        # The block goes back exactly as returned, first in the history, as an assistant message.
+        summary_msg = {"role": "assistant", "content": [block.model_dump(mode="json", exclude_none=True)]}
+        self.db.replace_messages(chronicle_id, [summary_msg] + recent)
+        self.db.set_recap_due(chronicle_id, True)
+        kept_chars = sum(len(json.dumps(m["content"])) for m in recent)
+        estimate = int(usage.get("prefix", 0) + len(block.content) / 3.5 + kept_chars / 3.5)
+        self.db.set_usage(chronicle_id, meter.after_compaction(usage, getattr(response, "usage", None), new_context=estimate))
+        kept = sum(1 for m in recent if m["role"] == "user" and _is_player_message(m))
+        yield self.db.append_event(chronicle_id, "memory", {
+            "text": f"Memory condensed ({reason}): {len(older)} earlier messages became a summary of about "
+                    f"{len(block.content.split()):,} words; the last {kept} turn{'s' if kept != 1 else ''} stay word for word. "
+                    f"The Storyteller will reread its notes next turn."
+        })
+        yield {"kind": "state", **public_state(self.db.get_chronicle(chronicle_id))}
+        log.info("chronicle %s: condensed %d messages (%s); context was ~%s", chronicle_id, len(older), reason, before)
+        if final:
+            yield {"kind": "done", **public_state(self.db.get_chronicle(chronicle_id))}
 
     def _sync_prefix(self, ch: dict) -> None:
         """Thinking blocks are bound to the exact system prompt and tool list that produced
@@ -134,11 +271,13 @@ class Storyteller:
             log.info("chronicle %s: Storyteller instructions changed; cleared %d old thinking blocks", ch["id"], n)
         self.db.set_prefix_hash(ch["id"], h)
 
-    def turn(self, chronicle_id: str, player_text: str | None, operator_note: str | None = None) -> Iterator[Event]:
+    def turn(self, chronicle_id: str, player_text: str | None, operator_note: str | None = None,
+             compact_after: bool = False) -> Iterator[Event]:
         """Run one player turn. Yields UI events as they happen.
 
         player_text: what the player typed (None for a Storyteller-initiated turn).
         operator_note: optional extra system instruction for this turn (e.g. session end).
+        compact_after: condense the chronicle's memory once the turn is done (session end).
         """
         ch = self.db.get_chronicle(chronicle_id)
         if not ch:
@@ -146,6 +285,7 @@ class Storyteller:
             return
         campaign = ch["campaign"]
         self._sync_prefix(ch)
+        self.db.set_usage(chronicle_id, meter.start_turn(ch.get("usage") or {}))
         pending: list[Event] = []
 
         def emit(kind: str, payload: dict):
@@ -214,6 +354,10 @@ class Storyteller:
                 break
 
             answered = True
+            self._note_usage(chronicle_id, getattr(response, "usage", None))
+            if ch.get("recap_due"):
+                self.db.set_recap_due(chronicle_id, False)  # the recap has been shown
+                ch["recap_due"] = 0
             content = [b.model_dump(mode="json", exclude_none=True) for b in response.content]
             self.db.append_message(chronicle_id, "assistant", content)
             narration = "".join(text_buf).strip()
@@ -253,4 +397,10 @@ class Storyteller:
                     yield pending.pop(0)
             self.db.append_message(chronicle_id, "user", results)
 
+        if answered and config.ENABLE_COMPACTION:
+            usage = self.db.get_chronicle(chronicle_id).get("usage") or {}
+            if compact_after:
+                yield from self.compact(chronicle_id, reason="session end", final=False)
+            elif usage.get("context", 0) >= config.COMPACT_AT:
+                yield from self.compact(chronicle_id, reason=f"context reached {usage['context']:,} tokens", final=False)
         yield {"kind": "done", **public_state(self.db.get_chronicle(chronicle_id))}

@@ -41,6 +41,8 @@ def get_config():
     return {
         "model": config.MODEL,
         "effort": config.EFFORT,
+        "cache_ttl": config.CACHE_TTL,
+        "compaction": {"enabled": config.ENABLE_COMPACTION, "at": config.COMPACT_AT, "session_end": config.COMPACT_AT_SESSION_END, "keep_turns": config.KEEP_RECENT_TURNS},
         "campaigns": {k: v["label"] for k, v in config.CAMPAIGNS.items()},
         "default_campaign": config.DEFAULT_CAMPAIGN,
         "vault": str(config.VAULT_DIR),
@@ -108,4 +110,15 @@ def end_session(cid: str):
         "up to date. Finish with one or two lines to the player about "
         "where things stand and what their character might be thinking about until next time."
     )
-    return StreamingResponse(_sse(st().turn(cid, "[Session end]", operator_note=note)), media_type="text/event-stream")
+    return StreamingResponse(
+        _sse(st().turn(cid, "[Session end]", operator_note=note, compact_after=config.COMPACT_AT_SESSION_END)),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/api/chronicles/{cid}/compact")
+def compact(cid: str):
+    """Condense the chronicle's memory now (the player asked, from the side panel)."""
+    if not st().db.get_chronicle(cid):
+        raise HTTPException(404)
+    return StreamingResponse(_sse(st().compact(cid, reason="requested")), media_type="text/event-stream")

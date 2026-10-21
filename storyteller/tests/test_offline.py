@@ -96,7 +96,7 @@ class VaultTests(unittest.TestCase):
 class SystemPromptTests(unittest.TestCase):
     def test_build_system(self):
         blocks = build_system("campaign1", VAULT)
-        self.assertEqual(blocks[-1]["cache_control"], {"type": "ephemeral"})
+        self.assertEqual(blocks[-1]["cache_control"], {"type": "ephemeral", "ttl": "1h"})
         text = "\n".join(b["text"] for b in blocks)
         self.assertIn("Core Mechanics", text)
         self.assertIn("Eleazar", text)
@@ -145,12 +145,19 @@ class FakeClient:
         return FakeStream(self.script.pop(0))
 
 
-def msg(*blocks, stop="end_turn"):
-    return SimpleNamespace(content=list(blocks), stop_reason=stop)
+def usage(input=1000, cache_read=0, cache_write=0, output=200, ttl="1h", iterations=None):
+    cc = SimpleNamespace(ephemeral_5m_input_tokens=cache_write if ttl == "5m" else 0,
+                         ephemeral_1h_input_tokens=cache_write if ttl == "1h" else 0)
+    return SimpleNamespace(input_tokens=input, cache_read_input_tokens=cache_read, cache_creation_input_tokens=cache_write,
+                           cache_creation=cc, output_tokens=output, iterations=iterations)
+
+
+def msg(*blocks, stop="end_turn", use=None):
+    return SimpleNamespace(content=list(blocks), stop_reason=stop, usage=use or usage())
 
 
 def _Msg(blocks, stop="end_turn"):
-    return SimpleNamespace(content=list(blocks), stop_reason=stop)
+    return SimpleNamespace(content=list(blocks), stop_reason=stop, usage=usage())
 
 
 def text(t):
@@ -200,8 +207,11 @@ class TurnLoopTests(unittest.TestCase):
         self.assertEqual(kw["output_config"], {"effort": config.EFFORT})
         self.assertEqual(kw["tools"], TOOL_SPECS)
         self.assertTrue(all(t.get("eager_input_streaming") for t in kw["tools"]))
-        self.assertEqual(kw["system"][-1]["cache_control"], {"type": "ephemeral"})
+        self.assertEqual(kw["system"][-1]["cache_control"], {"type": "ephemeral", "ttl": "1h"})
+        self.assertEqual(kw["cache_control"], {"type": "ephemeral", "ttl": "1h"})  # conversation tail is cached too
+        self.assertNotIn("context_management", kw)  # no threshold compaction: the app condenses on request
         self.assertEqual(kw["messages"][-1]["role"], "system")
+        self.assertNotIn("compact-2026-09-04", kw.get("betas", []))  # no summary block yet
         # state persisted
         ch = self.db.get_chronicle(self.ch["id"])
         self.assertEqual(ch["scene"]["location"], "The Met")
@@ -212,6 +222,12 @@ class TurnLoopTests(unittest.TestCase):
         self.assertEqual(done["scene"]["location"], "The Met")
         self.assertIn("view", done)
         self.assertNotIn("notes", done)
+        # usage was recorded: three requests, the last one's context is the meter reading
+        m = done["meter"]
+        self.assertEqual(m["total"]["requests"], 3)
+        self.assertEqual(m["context"], 1000)
+        self.assertEqual(m["limit"], config.COMPACT_AT)
+        self.assertIsNotNone(m["cost"])
         self.assertTrue(any(e["kind"] == "dice" and not e.get("hidden") and len(e["dice"]) == 5 for e in self.db.get_events(self.ch["id"])))
 
     def test_hidden_roll_and_bad_tool(self):
@@ -487,6 +503,172 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(len(st.client.requests), 2)
         retry = st.client.requests[1]["messages"]
         self.assertFalse([b for m in retry if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"])
+
+
+# ---------- meter ----------
+from storyteller import meter  # noqa: E402
+
+
+class MeterTests(unittest.TestCase):
+    def test_record_sums_iterations_and_reads_context(self):
+        st = meter.record({}, usage(input=500, cache_read=40000, cache_write=3000, output=900))
+        self.assertEqual(st["context"], 43500)
+        self.assertEqual(st["total"]["cache_write_1h"], 3000)
+        self.assertEqual(st["total"]["requests"], 1)
+        its = [SimpleNamespace(type="compaction", input_tokens=150000, output_tokens=3500, cache_read_input_tokens=0, cache_creation_input_tokens=0, cache_creation=None),
+               SimpleNamespace(type="message", input_tokens=23000, output_tokens=1000, cache_read_input_tokens=0, cache_creation_input_tokens=0, cache_creation=None)]
+        st = meter.record(st, usage(input=23000, output=1000, iterations=its))
+        self.assertEqual(st["total"]["compactions"], 1)
+        self.assertEqual(st["total"]["input"], 500 + 150000 + 23000)
+        self.assertEqual(st["context"], 23000)  # the normal step, not the condensing step
+        v = meter.view(st, "claude-opus-5-5")
+        self.assertEqual(v["context"], 23000)
+        self.assertAlmostEqual(v["cost"], (173500 * 4 + 40000 * 0.2 + 3000 * 8 + 5400 * 20) / 1e6, places=6)
+        self.assertIsNone(meter.view(st, "some-unknown-model")["cost"])
+
+    def test_turn_resets(self):
+        st = meter.record({}, usage(input=100, output=10))
+        st = meter.start_turn(st)
+        st = meter.record(st, usage(input=50, cache_read=200, output=5))
+        self.assertEqual(st["turn"]["input"], 50)
+        self.assertEqual(st["total"]["input"], 150)
+        self.assertAlmostEqual(meter.view(st)["turn"]["cached"], 200 / 250)
+
+
+# ---------- condensing & recap ----------
+def compaction_block(text="Summary of the nights so far.", **extra):
+    return _Block(type="compaction", content=text, encrypted_content="enc", signature="sig", **extra)
+
+
+class CompactionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = DB(self.tmp / "t.db")
+        self.vault = Vault(VAULT)
+        self.ch = self.db.create_chronicle("C", "campaign1")
+        self.cid = self.ch["id"]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _play(self, st, n):
+        for i in range(n):
+            list(st.turn(self.cid, f"move {i + 1}"))
+
+    def test_split_keeps_recent_player_turns(self):
+        msgs = []
+        for i in range(4):
+            msgs += [{"role": "user", "content": [{"type": "text", "text": f"move {i}"}]}, {"role": "system", "content": "screen"},
+                     {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "roll_dice", "input": {}}]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "{}"}]},
+                     {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}]
+        older, recent = Storyteller._split_for_compaction(msgs, 2)
+        self.assertEqual(len(older), 10)
+        self.assertEqual(recent[0]["content"][0]["text"], "move 2")
+        self.assertEqual(Storyteller._split_for_compaction(msgs, 0), (msgs, []))
+        self.assertEqual(Storyteller._split_for_compaction(msgs, 9), ([], msgs))
+
+    def test_condense_replaces_history_and_recap_follows(self):
+        class Client(FakeClient):
+            def __init__(self, script):
+                super().__init__(script)
+                self.creates = []
+                self.beta.messages.create = self._create
+
+            def _create(self, **kw):
+                self.creates.append(kw)
+                return SimpleNamespace(content=[compaction_block()], stop_reason="end_turn",
+                                       usage=usage(input=20000, output=800, iterations=[SimpleNamespace(type="compaction", input_tokens=20000, output_tokens=800, cache_read_input_tokens=0, cache_creation_input_tokens=0, cache_creation=None)]))
+
+        client = Client([msg(text(f"Night {i}.")) for i in range(6)])
+        st = Storyteller(self.db, self.vault, client)
+        self._play(st, 4)
+        self.db.set_notes(self.cid, {"recap": "Anja owes Rene a boon.", "secrets": "Eleazar watches."})
+        events = list(st.compact(self.cid, reason="requested"))
+        kinds = [e["kind"] for e in events]
+        self.assertEqual(kinds[0], "working")
+        self.assertIn("memory", kinds)
+        self.assertEqual(kinds[-1], "done")
+        # the condensing request: older turns only, the summarizer instructions, the beta
+        req = client.creates[0]
+        self.assertEqual(req["compaction"]["type"], "summarize")
+        self.assertIn("Vampire", req["compaction"]["instructions"])
+        self.assertEqual(req["betas"], ["compact-2026-09-04"])
+        self.assertEqual(len(req["messages"]), 6)  # moves 1-2: user, system, assistant each
+        self.assertNotIn("cache_control", req)
+        # history now starts with the summary block, followed by the last two turns verbatim
+        hist = self.db.get_messages(self.cid)
+        self.assertEqual(hist[0]["role"], "assistant")
+        self.assertEqual(hist[0]["content"][0]["type"], "compaction")
+        self.assertEqual(hist[0]["content"][0]["signature"], "sig")
+        self.assertEqual(hist[1]["content"][0]["text"], "move 3")
+        self.assertEqual(len(hist), 7)
+        self.assertEqual(self.db.get_chronicle(self.cid)["usage"]["total"]["compactions"], 1)
+        self.assertTrue(self.db.get_chronicle(self.cid)["usage"]["estimated"])  # until the next real reading
+        self.assertTrue(self.db.get_chronicle(self.cid)["recap_due"])
+        # the next turn shows the notes in full, then clears the flag
+        list(st.turn(self.cid, "move 5"))
+        sent = client.requests[-1]["messages"]
+        self.assertEqual(sent[0]["content"][0]["type"], "compaction")
+        self.assertIn("compact-2026-09-04", client.requests[-1]["betas"])  # the block needs the beta on every request
+        self.assertFalse(self.db.get_chronicle(self.cid)["usage"]["estimated"])  # a real reading again
+        screen = [m for m in sent if m["role"] == "system"][-1]["content"]
+        self.assertIn("condensed", screen)
+        self.assertIn("Anja owes Rene a boon.", screen)
+        self.assertFalse(self.db.get_chronicle(self.cid)["recap_due"])
+        list(st.turn(self.cid, "move 6"))
+        screen2 = [m for m in client.requests[-1]["messages"] if m["role"] == "system"][-1]["content"]
+        self.assertNotIn("Anja owes Rene a boon.", screen2)
+
+    def test_threshold_and_session_end_trigger(self):
+        class Client(FakeClient):
+            def __init__(self, script):
+                super().__init__(script)
+                self.creates = []
+                self.beta.messages.create = self._create
+
+            def _create(self, **kw):
+                self.creates.append(kw)
+                return SimpleNamespace(content=[compaction_block()], stop_reason="end_turn", usage=usage(input=100, output=50))
+
+        big = usage(input=1000, cache_read=config.COMPACT_AT, output=100)
+        client = Client([msg(text("a")), msg(text("b")), msg(text("c"), use=big), msg(text("d")), msg(text("e"))])
+        st = Storyteller(self.db, self.vault, client)
+        self._play(st, 2)
+        self.assertEqual(client.creates, [])
+        events = list(st.turn(self.cid, "move 3"))  # this reply reports a context past the limit
+        self.assertEqual(len(client.creates), 1)
+        self.assertTrue(any(e["kind"] == "memory" and "condensed" in e["text"] for e in events))
+        self.assertEqual(events[-1]["kind"], "done")
+        list(st.turn(self.cid, "move 4"))
+        self.assertEqual(len(client.creates), 1)  # small context again: no condensing
+        list(st.turn(self.cid, "move 5", compact_after=True))
+        self.assertEqual(len(client.creates), 2)  # session end condenses
+
+    def test_failed_summary_keeps_history(self):
+        class Client(FakeClient):
+            def __init__(self, script):
+                super().__init__(script)
+                self.beta.messages.create = lambda **kw: SimpleNamespace(content=[], stop_reason="tool_use", usage=usage(input=100, output=20))
+
+        client = Client([msg(text("a")) for _ in range(4)])
+        st = Storyteller(self.db, self.vault, client)
+        self._play(st, 4)
+        before = self.db.get_messages(self.cid)
+        events = list(st.compact(self.cid))
+        self.assertIn("tried to call a tool", next(e for e in events if e["kind"] == "memory")["text"])
+        self.assertEqual(self.db.get_messages(self.cid), before)
+        self.assertFalse(self.db.get_chronicle(self.cid)["recap_due"])
+
+    def test_guards(self):
+        client = FakeClient([msg(text("a"))])
+        st = Storyteller(self.db, self.vault, client)
+        self._play(st, 1)
+        events = list(st.compact(self.cid))
+        self.assertIn("nothing old enough", events[0]["text"])
+        self.db.append_message(self.cid, "user", [{"type": "tool_result", "tool_use_id": "x", "content": "dangling"}])
+        events = list(st.compact(self.cid))
+        self.assertIn("did not finish cleanly", events[0]["text"])
 
 
 if __name__ == "__main__":

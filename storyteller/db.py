@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS events (
 MIGRATIONS = {
     "inventory": "ALTER TABLE chronicles ADD COLUMN inventory TEXT NOT NULL DEFAULT '{}'",
     "prefix_hash": "ALTER TABLE chronicles ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
+    "usage": "ALTER TABLE chronicles ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'",
+    "recap_due": "ALTER TABLE chronicles ADD COLUMN recap_due INTEGER NOT NULL DEFAULT 0",
 }
 
 THINKING_TYPES = {"thinking", "redacted_thinking"}
@@ -90,7 +92,7 @@ class DB:
         if not r:
             return None
         d = dict(r)
-        for k in ("sheet", "scene", "notes", "inventory"):
+        for k in ("sheet", "scene", "notes", "inventory", "usage"):
             d[k] = json.loads(d.get(k) or "{}")
         if isinstance(d["inventory"], list):  # tolerate a bare list
             d["inventory"] = {"seq": len(d["inventory"]), "items": d["inventory"]}
@@ -99,7 +101,7 @@ class DB:
         return d
 
     def _set_json(self, cid: str, column: str, value: dict) -> None:
-        assert column in {"sheet", "scene", "notes", "inventory"}
+        assert column in {"sheet", "scene", "notes", "inventory", "usage"}
         with self._conn() as c:
             c.execute(f"UPDATE chronicles SET {column} = ? WHERE id = ?", (json.dumps(value, ensure_ascii=False), cid))
 
@@ -118,6 +120,13 @@ class DB:
     def set_prefix_hash(self, cid: str, value: str) -> None:
         with self._conn() as c:
             c.execute("UPDATE chronicles SET prefix_hash = ? WHERE id = ?", (value, cid))
+
+    def set_usage(self, cid: str, usage: dict) -> None:
+        self._set_json(cid, "usage", usage)
+
+    def set_recap_due(self, cid: str, due: bool) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE chronicles SET recap_due = ? WHERE id = ?", (1 if due else 0, cid))
 
     # ---------- API history ----------
     def get_messages(self, cid: str) -> list[dict]:
@@ -163,6 +172,16 @@ class DB:
                         (json.dumps(kept, ensure_ascii=False), cid, r["seq"]),
                     )
         return removed
+
+    def replace_messages(self, cid: str, messages: list[dict]) -> None:
+        """Replace the whole API history (used after the API condenses it into a summary block)."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE chronicle_id = ?", (cid,))
+            for seq, m in enumerate(messages, 1):
+                c.execute(
+                    "INSERT INTO messages (chronicle_id, seq, role, content) VALUES (?, ?, ?, ?)",
+                    (cid, seq, m["role"], json.dumps(m["content"], ensure_ascii=False)),
+                )
 
     def has_messages(self, cid: str) -> bool:
         with self._conn() as c:
