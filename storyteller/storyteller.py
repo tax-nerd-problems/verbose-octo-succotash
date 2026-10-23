@@ -193,6 +193,9 @@ class Storyteller:
         if not ch:
             yield {"kind": "error", "message": "no such chronicle"}
             return
+        repaired = self._repair_history(ch)
+        if repaired:
+            yield repaired
         messages = self.db.get_messages(chronicle_id)
         if messages and messages[-1]["role"] != "assistant":
             yield self.db.append_event(chronicle_id, "memory", {"text": "Memory not condensed: the last turn did not finish cleanly. Send another message first."})
@@ -263,6 +266,18 @@ class Storyteller:
         if final:
             yield {"kind": "done", **public_state(self.db.get_chronicle(chronicle_id))}
 
+    def _repair_history(self, ch: dict) -> Event | None:
+        """Bring a history written by an older release into the current shape."""
+        n = self.db.convert_legacy_summary(ch["id"])
+        if not n:
+            return None
+        log.info("chronicle %s: converted %d summary block(s) from the first release", ch["id"], n)
+        self.db.set_recap_due(ch["id"], True)
+        return self.db.append_event(ch["id"], "memory", {
+            "text": "Memory format updated: a summary made by an earlier version of the app was converted so play can continue. "
+                    "The Storyteller will reread its notes next turn."
+        })
+
     def _sync_prefix(self, ch: dict) -> None:
         """Thinking blocks are bound to the exact system prompt and tool list that produced
         them. If either changed since this chronicle's last turn (an app update, or an edit to
@@ -290,6 +305,10 @@ class Storyteller:
             return
         campaign = ch["campaign"]
         self._sync_prefix(ch)
+        repaired = self._repair_history(ch)
+        if repaired:
+            yield repaired
+            ch = self.db.get_chronicle(chronicle_id)
         self.db.set_usage(chronicle_id, meter.start_turn(ch.get("usage") or {}))
         pending: list[Event] = []
 

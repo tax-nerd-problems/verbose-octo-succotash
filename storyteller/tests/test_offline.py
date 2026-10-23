@@ -464,6 +464,47 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(sent[5]["content"], [{"type": "text", "text": "…"}])  # an all-thinking turn keeps a placeholder
         self.assertTrue(db.get_chronicle("abc")["prefix_hash"])
 
+    def test_first_release_summary_block_is_converted(self):
+        """The first release stored the API's size-triggered summary inside an assistant
+        message mid-history; later releases must convert it or every turn 400s."""
+        db = DB(self.tmp / "legacy.db")
+        ch = db.create_chronicle("Long test", "campaign1")
+        cid = ch["id"]
+        for i in range(3):  # three old turns the summary covers
+            db.append_message(cid, "user", [{"type": "text", "text": f"old move {i}"}])
+            db.append_message(cid, "system", "screen")
+            db.append_message(cid, "assistant", [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": f"old night {i}"}])
+        db.append_message(cid, "user", [{"type": "text", "text": "move 4"}])
+        db.append_message(cid, "system", "screen")
+        db.append_message(cid, "assistant", [  # the turn in which the API summarized, as the first release saved it
+            {"type": "compaction", "content": "Anja met Rene and owes him a boon."},
+            {"type": "thinking", "thinking": "", "signature": "t"},
+            {"type": "tool_use", "id": "t1", "name": "roll_dice", "input": {"pool": 3, "difficulty": 6, "label": "x"}},
+        ])
+        db.append_message(cid, "user", [{"type": "tool_result", "tool_use_id": "t1", "content": "{}"}])
+        db.append_message(cid, "assistant", [{"type": "compaction", "content": None}, {"type": "text", "text": "Night 4 ends."}])  # a failed one
+        db.append_message(cid, "user", [{"type": "text", "text": "move 5"}])
+        db.append_message(cid, "system", "screen")
+        db.append_message(cid, "assistant", [{"type": "text", "text": "Night 5."}])
+        db.set_notes(cid, {"recap": "Rene is owed a boon."})
+        client = FakeClient([msg(text("Night 6."))])
+        events = list(Storyteller(db, self.vault, client).turn(cid, "move 6"))
+        self.assertTrue(any(e["kind"] == "memory" and "converted" in e["text"] for e in events))
+        self.assertEqual(events[-1]["kind"], "done")
+        sent = client.requests[0]["messages"]
+        self.assertEqual(sent[0]["role"], "user")
+        self.assertIn("Anja met Rene and owes him a boon.", sent[0]["content"][0]["text"])
+        self.assertEqual(sent[1], {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "roll_dice", "input": {"pool": 3, "difficulty": 6, "label": "x"}}]})
+        self.assertEqual(sent[2]["content"][0]["type"], "tool_result")
+        self.assertEqual(sent[3]["content"], [{"type": "text", "text": "Night 4 ends."}])  # failed block dropped, text kept
+        blocks = [b for m in sent for b in (m["content"] if isinstance(m["content"], list) else [])]
+        self.assertFalse([b for b in blocks if b.get("type") in ("compaction", "thinking")])
+        self.assertFalse(any(m["content"] and "old move" in json.dumps(m["content"]) for m in sent))  # summarized turns gone
+        self.assertNotIn("compact-2026-09-04", client.requests[0].get("betas", []))
+        self.assertIn("Rene is owed a boon.", [m for m in sent if m["role"] == "system"][-1]["content"])  # notes shown again
+        # running it again is a no-op
+        self.assertEqual(db.convert_legacy_summary(cid), 0)
+
     def test_unchanged_instructions_keep_thinking(self):
         db = DB(self.tmp / "new.db")
         ch = db.create_chronicle("New", "campaign1")

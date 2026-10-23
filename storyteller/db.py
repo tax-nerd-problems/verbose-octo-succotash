@@ -190,6 +190,55 @@ class DB:
                     (cid, seq, m["role"], json.dumps(m["content"], ensure_ascii=False)),
                 )
 
+    def convert_legacy_summary(self, cid: str) -> int:
+        """Rewrite a history that still carries a summary block made by the first release.
+
+        The first release let the API summarize at a size threshold; the summary came
+        back as a `compaction` block inside an assistant message, mid-history, and the
+        API only recognised it under that release's beta header. Later releases
+        condense differently and no longer send that header, so the old block is
+        rejected ("Input tag 'compaction' ... does not match"). This turns the last
+        such summary into plain text at the front of the history, drops the messages
+        it summarized (the API was already discarding them), and removes any failed
+        summary blocks. Returns the number of blocks handled (0 = nothing to do).
+        """
+        messages = self.get_messages(cid)
+        hits = []
+        for i, m in enumerate(messages):
+            if not isinstance(m["content"], list):
+                continue
+            for j, b in enumerate(m["content"]):
+                if isinstance(b, dict) and b.get("type") == "compaction" and not (i == 0 and j == 0):
+                    hits.append((i, j, b))
+        if not hits:
+            return 0
+        real = [(i, j, b) for i, j, b in hits if b.get("content")]
+        if real:
+            i, j, block = real[-1]  # the last summary covers everything before it
+            rest = [b for k, b in enumerate(messages[i]["content"]) if k != j and not (isinstance(b, dict) and b.get("type") in THINKING_TYPES)]
+            summary_text = (
+                "[Chronicle so far, condensed by the Storyteller's memory before this point:]\n\n"
+                + str(block["content"]).strip()
+            )
+            new = [{"role": "user", "content": [{"type": "text", "text": summary_text}]}]
+            if rest:
+                new.append({"role": "assistant", "content": rest})
+            new.extend(messages[i + 1:])
+        else:
+            new = messages
+        # Failed summaries (content null) are no-ops server-side; just drop them.
+        cleaned = []
+        for m in new:
+            if isinstance(m["content"], list):
+                kept = [b for b in m["content"] if not (isinstance(b, dict) and b.get("type") == "compaction" and not b.get("content"))]
+                if not kept:
+                    continue
+                m = {**m, "content": kept}
+            cleaned.append(m)
+        self.replace_messages(cid, cleaned)
+        self.strip_thinking(cid)  # the history changed, so earlier reasoning is no longer bound to it
+        return len(hits)
+
     def has_messages(self, cid: str) -> bool:
         with self._conn() as c:
             return c.execute("SELECT 1 FROM messages WHERE chronicle_id = ? LIMIT 1", (cid,)).fetchone() is not None
