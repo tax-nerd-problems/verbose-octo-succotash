@@ -244,11 +244,14 @@ def _item_line(it: dict) -> str:
 class ToolContext:
     """Binds tool implementations to one chronicle. Emits UI events via `emit`."""
 
-    def __init__(self, db: DB, vault: Vault, chronicle_id: str, emit):
+    def __init__(self, db: DB, vault: Vault, chronicle_id: str, emit, chronicle_name: str | None = None):
         self.db = db
         self.vault = vault
         self.cid = chronicle_id
         self.emit = emit  # callable(kind: str, payload: dict)
+        if chronicle_name is None and db is not None:
+            chronicle_name = (db.get_chronicle(chronicle_id) or {}).get("name", "")
+        self.name = chronicle_name or ""  # vault reads and writes are scoped to this chronicle
 
     def validate(self, name: str, args: Any) -> str | None:
         spec = next((s for s in TOOL_SPECS if s["name"] == name), None)
@@ -499,36 +502,36 @@ class ToolContext:
 
     # ---------- vault reads ----------
     def t_search_vault(self, query, folder=None, limit=8):
-        hits = self.vault.search(query, limit=limit, folder=folder)
+        hits = self.vault.search(query, limit=limit, folder=folder, chronicle=self.name)
         self.emit("tool", {"name": "search_vault", "detail": f"searched the vault for “{query}”"})
         if not hits:
             return "no matches"
         return "\n".join(f"- [[{n.title}]] ({n.folder or 'root'}; tags: {', '.join(n.tags[:4])}) — {snip}" for n, _, snip in hits)
 
     def t_read_note(self, name, section=None):
-        note = self.vault.resolve(name)
-        if not note:
-            hits = self.vault.search(name, limit=5)
+        note = self.vault.resolve(name, self.name or None)
+        if not note or not self.vault.belongs(note, self.name):
+            hits = self.vault.search(name, limit=5, chronicle=self.name)
             sugg = ", ".join(f"[[{n.title}]]" for n, _, _ in hits) or "none"
             return f"no note named {name!r}. Closest: {sugg}"
         self.emit("tool", {"name": "read_note", "detail": f"consulted [[{note.title}]]" + (f" § {section}" if section else "")})
-        meta = {k: v for k, v in note.meta.items() if k not in ("tags", "aliases")}
+        meta = self.vault.meta_for(note, self.name)
         head = f"# {note.title}\n(path: {note.rel}; tags: {', '.join(note.tags)}; {json.dumps(meta, default=str)})\n\n"
         if section:
             sec = note.section(section)
             if sec is None:
                 return head + f"(no section {section!r}; headings: {note.headings()})"
             return head + sec
-        body = note.body
+        body = self.vault.body_for(note, self.name)
         if len(body) > 24000:
-            body = body[:24000] + f"\n\n[truncated; {len(note.body) - 24000} more characters. Headings: {note.headings()}; ask for a section]"
+            body = body[:24000] + f"\n\n[truncated; {len(body) - 24000} more characters. Headings: {note.headings()}; ask for a section]"
         return head + body
 
     def t_list_notes(self, tag=None, folder=None):
         if tag:
-            notes = self.vault.list_by_tag(tag)
+            notes = self.vault.list_by_tag(tag, chronicle=self.name)
         elif folder:
-            notes = self.vault.list_folder(folder)
+            notes = self.vault.list_folder(folder, chronicle=self.name)
         else:
             return "provide tag or folder"
         self.emit("tool", {"name": "list_notes", "detail": f"listed notes ({tag or folder})"})
@@ -538,17 +541,16 @@ class ToolContext:
 
     # ---------- vault writes ----------
     def t_write_session_log(self, title, content):
-        ch = self.db.get_chronicle(self.cid)
-        rel = self.vault.write_session_log(title, content, chronicle=ch["name"])
+        rel = self.vault.write_session_log(title, content, chronicle=self.name)
         self.emit("tool", {"name": "write_session_log", "detail": f"wrote {rel} to the vault"})
         return f"written to {rel}"
 
     def t_append_to_vault_note(self, name, text):
-        rel = self.vault.append_to_note(name, text)
+        rel = self.vault.append_to_note(name, text, chronicle=self.name)
         self.emit("tool", {"name": "append_to_vault_note", "detail": f"added a chronicle note to {rel}"})
         return f"appended to {rel}"
 
     def t_set_character_state(self, name, state):
-        rel = self.vault.set_frontmatter(name, "char state", state)
+        rel = self.vault.set_character_state(name, state, chronicle=self.name)
         self.emit("tool", {"name": "set_character_state", "detail": f"{rel}: char state → {state}"})
         return f"{rel}: char state = {state}"

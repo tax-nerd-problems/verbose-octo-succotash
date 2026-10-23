@@ -573,12 +573,14 @@ class CompactionTests(unittest.TestCase):
             def __init__(self, script):
                 super().__init__(script)
                 self.creates = []
-                self.beta.messages.create = self._create
 
-            def _create(self, **kw):
-                self.creates.append(kw)
-                return SimpleNamespace(content=[compaction_block()], stop_reason="end_turn",
-                                       usage=usage(input=20000, output=800, iterations=[SimpleNamespace(type="compaction", input_tokens=20000, output_tokens=800, cache_read_input_tokens=0, cache_creation_input_tokens=0, cache_creation=None)]))
+            def _stream(self, **kw):
+                if "compaction" in kw:
+                    self.creates.append(kw)
+                    final = SimpleNamespace(content=[compaction_block()], stop_reason="compaction",
+                                            usage=usage(input=20000, output=800, iterations=[SimpleNamespace(type="compaction", input_tokens=20000, output_tokens=800, cache_read_input_tokens=0, cache_creation_input_tokens=0, cache_creation=None)]))
+                    return FakeStream(final)
+                return super()._stream(**kw)
 
         client = Client([msg(text(f"Night {i}.")) for i in range(6)])
         st = Storyteller(self.db, self.vault, client)
@@ -594,6 +596,7 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(req["compaction"]["type"], "summarize")
         self.assertIn("Vampire", req["compaction"]["instructions"])
         self.assertEqual(req["betas"], ["compact-2026-09-04"])
+        self.assertEqual(req["tools"], TOOL_SPECS)  # identical to play, so kept turns' thinking stays valid
         self.assertEqual(len(req["messages"]), 6)  # moves 1-2: user, system, assistant each
         self.assertNotIn("cache_control", req)
         # history now starts with the summary block, followed by the last two turns verbatim
@@ -625,11 +628,12 @@ class CompactionTests(unittest.TestCase):
             def __init__(self, script):
                 super().__init__(script)
                 self.creates = []
-                self.beta.messages.create = self._create
 
-            def _create(self, **kw):
-                self.creates.append(kw)
-                return SimpleNamespace(content=[compaction_block()], stop_reason="end_turn", usage=usage(input=100, output=50))
+            def _stream(self, **kw):
+                if "compaction" in kw:
+                    self.creates.append(kw)
+                    return FakeStream(SimpleNamespace(content=[compaction_block()], stop_reason="compaction", usage=usage(input=100, output=50)))
+                return super()._stream(**kw)
 
         big = usage(input=1000, cache_read=config.COMPACT_AT, output=100)
         client = Client([msg(text("a")), msg(text("b")), msg(text("c"), use=big), msg(text("d")), msg(text("e"))])
@@ -647,9 +651,10 @@ class CompactionTests(unittest.TestCase):
 
     def test_failed_summary_keeps_history(self):
         class Client(FakeClient):
-            def __init__(self, script):
-                super().__init__(script)
-                self.beta.messages.create = lambda **kw: SimpleNamespace(content=[], stop_reason="tool_use", usage=usage(input=100, output=20))
+            def _stream(self, **kw):
+                if "compaction" in kw:
+                    return FakeStream(SimpleNamespace(content=[], stop_reason="tool_use", usage=usage(input=100, output=20)))
+                return super()._stream(**kw)
 
         client = Client([msg(text("a")) for _ in range(4)])
         st = Storyteller(self.db, self.vault, client)
@@ -669,6 +674,125 @@ class CompactionTests(unittest.TestCase):
         self.db.append_message(self.cid, "user", [{"type": "tool_result", "tool_use_id": "x", "content": "dangling"}])
         events = list(st.compact(self.cid))
         self.assertIn("did not finish cleanly", events[0]["text"])
+
+
+# ---------- several chronicles sharing one vault ----------
+from storyteller.vault import slug  # noqa: E402
+
+
+class SharedVaultTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "Characters").mkdir()
+        (self.tmp / "Characters" / "Bob.md").write_text("---\nchar state: alive\ntags: [VTM/npc]\n---\n# Bob\n\nA guy.\n")
+        self.v = Vault(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_session_logs_are_separated_and_hidden_from_each_other(self):
+        a = self.v.write_session_log("Session 1 - The Ball", "Anja met Rene.", chronicle="Anja in New York")
+        b = self.v.write_session_log("Session 1 - The Ball", "Bea met Calebros.", chronicle="Bea: a second run")
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith(f"{config.SESSION_LOG_DIR}/{slug('Anja in New York')}/"))
+        self.assertTrue((self.tmp / a).exists() and (self.tmp / b).exists())
+        hits = [n.rel for n, _, _ in self.v.search("Session Ball", chronicle="Anja in New York")]
+        self.assertIn(a, hits)
+        self.assertNotIn(b, hits)
+        self.assertEqual([n.rel for n in self.v.list_by_tag("VTM/session", chronicle="Bea: a second run")], [b])
+        self.assertEqual(len(self.v.list_by_tag("VTM/session")), 2)  # no chronicle given: everything
+        # same title in two chronicles: each resolves to its own
+        self.assertEqual(self.v.resolve("2026-10-23 - Session 1 - The Ball".replace("2026-10-23", a.split("/")[-1][:10]), "Bea: a second run").rel, b)
+        self.assertEqual(self.v.resolve(a.split("/")[-1][:-3], "Anja in New York").rel, a)
+
+    def test_npc_notes_are_tagged_and_filtered(self):
+        self.v.append_to_note("Bob", "Owes Anja a boon.", chronicle="Anja in New York")
+        self.v.append_to_note("Bob", "Hates Bea.", chronicle="Bea: a second run")
+        self.v.append_to_note("Bob", "An untagged, older note.")
+        bob = self.v.resolve("Bob")
+        raw = bob.body
+        self.assertIn("· Anja in New York** — Owes Anja a boon.", raw)
+        seen_by_anja = self.v.body_for(bob, "Anja in New York")
+        self.assertIn("Owes Anja a boon.", seen_by_anja)
+        self.assertNotIn("Hates Bea.", seen_by_anja)
+        self.assertIn("An untagged, older note.", seen_by_anja)
+        self.assertIn("A guy.", seen_by_anja)
+        self.assertEqual(self.v.body_for(bob, None), raw)
+
+    def test_character_state_names_its_chronicle(self):
+        self.v.set_character_state("Bob", "dead", chronicle="Anja in New York")
+        bob = self.v.resolve("Bob")
+        self.assertEqual(bob.meta["char state"], "dead")
+        self.assertEqual(bob.meta["char state chronicle"], "Anja in New York")
+        self.assertIn("char state → dead", bob.body)
+        self.assertEqual(self.v.meta_for(bob, "Anja in New York")["char state"], "dead")
+        other = self.v.meta_for(bob, "Bea: a second run")["char state"]
+        self.assertIn("not this one", other)
+        self.assertNotIn("char state chronicle", self.v.meta_for(bob, "Bea: a second run"))
+
+    def test_tools_are_scoped(self):
+        db = DB(self.tmp / "t.db")
+        a = db.create_chronicle("Anja in New York", "campaign1")
+        b = db.create_chronicle("Bea: a second run", "campaign1")
+        ctx_a = ToolContext(db, self.v, a["id"], lambda *x: None)
+        ctx_b = ToolContext(db, self.v, b["id"], lambda *x: None)
+        ctx_a.run("set_character_state", {"name": "Bob", "state": "torpor"})
+        ctx_a.run("append_to_vault_note", {"name": "Bob", "text": "Staked under the Cloisters."})
+        ctx_a.run("write_session_log", {"title": "Session 2", "content": "Bob fell."})
+        out_b = ctx_b.run("read_note", {"name": "Bob"})
+        self.assertIn("not this one", out_b)
+        self.assertNotIn("Staked under the Cloisters.", out_b)
+        self.assertIn("Staked under the Cloisters.", ctx_a.run("read_note", {"name": "Bob"}))
+        self.assertIn("no note named", ctx_b.run("read_note", {"name": "Session 2"}))
+        self.assertIn("Bob fell.", ctx_a.run("read_note", {"name": "Session 2"}))
+
+
+# ---------- the server keeps one turn per chronicle ----------
+from storyteller import server  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+
+
+class ServerLockTests(unittest.TestCase):
+    def test_second_turn_on_same_chronicle_is_refused_until_the_first_ends(self):
+        def gen():
+            yield {"kind": "delta"}
+            yield {"kind": "done"}
+        first = server.exclusive("c1", gen())
+        next(first)  # streaming has begun
+        with self.assertRaises(HTTPException) as cm:
+            server.exclusive("c1", gen())
+        self.assertEqual(cm.exception.status_code, 409)
+        other = server.exclusive("c2", gen())  # a different chronicle runs side by side
+        self.assertEqual(list(other)[-1]["kind"], "done")
+        list(first)  # drain: the lock is released
+        self.assertEqual(list(server.exclusive("c1", gen()))[-1]["kind"], "done")
+
+    def test_lock_is_released_when_the_client_disconnects(self):
+        def gen():
+            yield {"kind": "delta"}
+            yield {"kind": "done"}
+        g = server.exclusive("c3", gen())
+        next(g)
+        g.close()  # the browser went away mid-stream
+        self.assertEqual(list(server.exclusive("c3", gen()))[-1]["kind"], "done")
+
+    def test_delete_removes_everything_for_that_chronicle_only(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            db = DB(tmp / "t.db")
+            a = db.create_chronicle("A", "campaign1")
+            b = db.create_chronicle("B", "campaign1")
+            for cid in (a["id"], b["id"]):
+                db.append_message(cid, "user", [{"type": "text", "text": "hi"}])
+                db.append_event(cid, "player", {"text": "hi"})
+            db.delete_chronicle(a["id"])
+            self.assertIsNone(db.get_chronicle(a["id"]))
+            self.assertEqual(db.get_messages(a["id"]), [])
+            self.assertEqual(db.get_events(a["id"]), [])
+            self.assertEqual(len(db.get_messages(b["id"])), 1)
+            self.assertEqual([c["name"] for c in db.list_chronicles()], ["B"])
+        finally:
+            shutil.rmtree(tmp)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,14 @@ WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 HEADING = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
 WORD = re.compile(r"[a-z0-9']+")
 AI_SECTION = "## Chronicle Notes (AI Storyteller)"
-ALLOWED_FRONTMATTER_KEYS = {"char state", "location", "status", "last seen"}
+ALLOWED_FRONTMATTER_KEYS = {"char state", "char state chronicle", "location", "status", "last seen"}
+# A chronicle-notes bullet: "- **2026-10-20 · Anja in New York** — text" (the chronicle part is optional on old bullets)
+BULLET = re.compile(r"^- \*\*\d{4}-\d{2}-\d{2}(?: · (?P<who>[^*]+?))?\*\* — ")
+
+
+def slug(name: str) -> str:
+    """A chronicle name as a safe folder name."""
+    return re.sub(r"[^\w\s\-&',.!]", "", str(name)).strip() or "Chronicle"
 
 
 def _read_text(path: Path) -> str:
@@ -85,16 +92,18 @@ class Note:
 class Vault:
     def __init__(self, root: Path | None = None):
         self.root = Path(root or config.VAULT_DIR).resolve()
-        self.notes: dict[str, Note] = {}  # key: lowercase title
-        self.by_rel: dict[str, Note] = {}
+        self.notes: dict[str, Note] = {}  # key: lowercase title (first note wins when titles repeat)
+        self.by_rel: dict[str, Note] = {}  # every note, by path
+        self.dupes: dict[str, list[Note]] = {}  # titles shared by several notes
         self._alias_index: dict[str, Note] = {}
         self.reload()
 
     # ---------- indexing ----------
     def reload(self) -> None:
-        self.notes.clear()
-        self.by_rel.clear()
-        self._alias_index.clear()
+        notes: dict[str, Note] = {}
+        by_rel: dict[str, Note] = {}
+        dupes: dict[str, list[Note]] = {}
+        alias_index: dict[str, Note] = {}
         for path in sorted(self.root.rglob("*.md")):
             rel = path.relative_to(self.root).as_posix()
             if rel.startswith(".") or "/." in rel or rel.startswith("storyteller/"):
@@ -125,15 +134,24 @@ class Vault:
                 folder=rel.rsplit("/", 1)[0] if "/" in rel else "",
             )
             note._words = set(WORD.findall(body.lower()))
-            self.notes[title.lower()] = note
-            self.by_rel[rel] = note
+            key = title.lower()
+            if key in notes:
+                dupes.setdefault(key, [notes[key]]).append(note)
+            else:
+                notes[key] = note
+            by_rel[rel] = note
             for a in note.aliases:
-                self._alias_index.setdefault(a.lower(), note)
-        # Second pass: resolve [[links]] lazily; nothing to precompute.
+                alias_index.setdefault(a.lower(), note)
+        # Swap the finished indexes in at once; readers on other threads see old or new, never a mix.
+        self.notes, self.by_rel, self.dupes, self._alias_index = notes, by_rel, dupes, alias_index
 
     # ---------- reading ----------
-    def resolve(self, name: str) -> Note | None:
-        """Resolve a note by title, alias, [[wikilink]], or relative path."""
+    def resolve(self, name: str, chronicle: str | None = None) -> Note | None:
+        """Resolve a note by title, alias, [[wikilink]], or relative path.
+
+        When several notes share a title (two chronicles' session logs, say), the one
+        belonging to `chronicle` wins.
+        """
         if not name:
             return None
         key = name.strip()
@@ -147,6 +165,10 @@ class Vault:
                 return n
             key = key[:-3]
         low = key.lower()
+        if low in self.dupes and chronicle:
+            for n in self.dupes[low]:
+                if n.meta.get("chronicle") and str(n.meta["chronicle"]) == chronicle:
+                    return n
         if low in self.notes:
             return self.notes[low]
         if low in self._alias_index:
@@ -161,22 +183,32 @@ class Vault:
             return cands[0]
         return None
 
-    def list_by_tag(self, tag: str) -> list[Note]:
+    @staticmethod
+    def belongs(note: Note, chronicle: str | None) -> bool:
+        """Notes written for one chronicle (session logs) are invisible to the others."""
+        owner = note.meta.get("chronicle")
+        return not owner or not chronicle or str(owner) == chronicle
+
+    def list_by_tag(self, tag: str, chronicle: str | None = None) -> list[Note]:
         tag = tag.lstrip("#").lower()
-        return [n for n in self.notes.values() if any(t.lower() == tag or t.lower().startswith(tag + "/") for t in n.tags)]
+        return [n for n in self.by_rel.values()
+                if self.belongs(n, chronicle) and any(t.lower() == tag or t.lower().startswith(tag + "/") for t in n.tags)]
 
-    def list_folder(self, folder: str) -> list[Note]:
+    def list_folder(self, folder: str, chronicle: str | None = None) -> list[Note]:
         folder = folder.strip("/").lower()
-        return [n for n in self.notes.values() if n.folder.lower() == folder or n.folder.lower().startswith(folder + "/")]
+        return [n for n in self.by_rel.values()
+                if self.belongs(n, chronicle) and (n.folder.lower() == folder or n.folder.lower().startswith(folder + "/"))]
 
-    def search(self, query: str, limit: int = 8, folder: str | None = None) -> list[tuple[Note, int, str]]:
+    def search(self, query: str, limit: int = 8, folder: str | None = None, chronicle: str | None = None) -> list[tuple[Note, int, str]]:
         """Rank notes by simple term scoring. Returns (note, score, snippet)."""
         terms = [t for t in WORD.findall(query.lower()) if len(t) > 1]
         if not terms:
             return []
         results = []
-        for note in self.notes.values():
+        for note in self.by_rel.values():
             if folder and not note.folder.lower().startswith(folder.strip("/").lower()):
+                continue
+            if not self.belongs(note, chronicle):
                 continue
             score = 0
             title_l = note.title.lower()
@@ -222,6 +254,27 @@ class Vault:
                 return re.sub(r"\s+", " ", body[start:end]).strip()
         return note.summary_line
 
+    def body_for(self, note: Note, chronicle: str | None) -> str:
+        """The note's body with chronicle notes from *other* chronicles removed."""
+        if not chronicle or AI_SECTION not in note.body:
+            return note.body
+        out = []
+        for line in note.body.splitlines():
+            m = BULLET.match(line)
+            if m and m.group("who") and m.group("who") != chronicle:
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def meta_for(self, note: Note, chronicle: str | None) -> dict:
+        """Frontmatter as this chronicle should read it: a state set by another chronicle is flagged."""
+        meta = {k: v for k, v in note.meta.items() if k not in ("tags", "aliases")}
+        owner = meta.pop("char state chronicle", None)
+        if owner and chronicle and str(owner) != chronicle and "char state" in meta:
+            meta["char state"] = (f"{meta['char state']} in the chronicle '{owner}', not this one; "
+                                  "in this chronicle assume the original state unless your own notes say otherwise")
+        return meta
+
     # ---------- writing ----------
     def _safe_path(self, rel: str) -> Path:
         p = (self.root / rel).resolve()
@@ -230,9 +283,10 @@ class Vault:
         return p
 
     def write_session_log(self, title: str, content: str, tags: list[str] | None = None, chronicle: str = "") -> str:
-        """Create (or overwrite the same-day) session log under the session folder."""
+        """Create (or overwrite the same-day) session log in the chronicle's own folder."""
         safe_title = re.sub(r"[^\w\s\-&',.!]", "", title).strip() or "Session"
-        rel = f"{config.SESSION_LOG_DIR}/{date.today().isoformat()} - {safe_title}.md"
+        folder = config.SESSION_LOG_DIR + (f"/{slug(chronicle)}" if chronicle else "")
+        rel = f"{folder}/{date.today().isoformat()} - {safe_title}.md"
         path = self._safe_path(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
         post = frontmatter.Post(
@@ -246,12 +300,12 @@ class Vault:
         self.reload()
         return rel
 
-    def append_to_note(self, name: str, text: str) -> str:
-        note = self.resolve(name)
+    def append_to_note(self, name: str, text: str, chronicle: str = "") -> str:
+        note = self.resolve(name, chronicle or None)
         if not note:
             raise ValueError(f"no note named {name!r}")
         raw = _read_text(note.path).rstrip("\n")
-        stamp = date.today().isoformat()
+        stamp = date.today().isoformat() + (f" · {chronicle}" if chronicle else "")
         entry = f"\n- **{stamp}** — {text.strip()}\n"
         if AI_SECTION in raw:
             raw = raw + entry
@@ -261,11 +315,11 @@ class Vault:
         self.reload()
         return note.rel
 
-    def set_frontmatter(self, name: str, key: str, value: str) -> str:
+    def set_frontmatter(self, name: str, key: str, value: str, chronicle: str = "") -> str:
         key = key.strip().lower()
         if key not in ALLOWED_FRONTMATTER_KEYS:
             raise ValueError(f"frontmatter key {key!r} is not editable; allowed: {sorted(ALLOWED_FRONTMATTER_KEYS)}")
-        note = self.resolve(name)
+        note = self.resolve(name, chronicle or None)
         if not note:
             raise ValueError(f"no note named {name!r}")
         post = frontmatter.loads(_read_text(note.path))
@@ -273,3 +327,11 @@ class Vault:
         note.path.write_text(frontmatter.dumps(post) + "\n", encoding="utf-8")
         self.reload()
         return note.rel
+
+    def set_character_state(self, name: str, state: str, chronicle: str = "") -> str:
+        """Record an NPC's state for Obsidian (frontmatter) and for this chronicle (a tagged bullet)."""
+        rel = self.set_frontmatter(name, "char state", state, chronicle)
+        if chronicle:
+            self.set_frontmatter(name, "char state chronicle", chronicle, chronicle)
+        self.append_to_note(name, f"char state → {state}", chronicle)
+        return rel

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from typing import Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -13,6 +15,33 @@ from .storyteller import Storyteller, public_state
 
 app = FastAPI(title="AI Storyteller")
 _st: Storyteller | None = None
+
+# One turn at a time per chronicle. Different chronicles run side by side; a second
+# request for the same chronicle while a turn is streaming is refused rather than
+# letting two turns interleave in its history.
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _lock_for(cid: str) -> threading.Lock:
+    with _locks_guard:
+        return _locks.setdefault(cid, threading.Lock())
+
+
+def exclusive(cid: str, gen: Iterator) -> Iterator:
+    """Hold the chronicle's lock for as long as the event stream runs."""
+    lock = _lock_for(cid)
+    if not lock.acquire(blocking=False):
+        gen.close()
+        raise HTTPException(409, "This chronicle is busy with another turn. Wait for it to finish.")
+
+    def run():
+        try:
+            yield from gen
+        finally:
+            lock.release()
+
+    return run()
 
 
 def st() -> Storyteller:
@@ -62,6 +91,20 @@ def create_chronicle(body: NewChronicle):
     return ch
 
 
+@app.delete("/api/chronicles/{cid}")
+def delete_chronicle(cid: str):
+    if not st().db.get_chronicle(cid):
+        raise HTTPException(404)
+    lock = _lock_for(cid)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "This chronicle is busy with a turn. Wait for it to finish, then delete it.")
+    try:
+        st().db.delete_chronicle(cid)
+    finally:
+        lock.release()
+    return {"deleted": cid}
+
+
 @app.get("/api/chronicles/{cid}")
 def get_chronicle(cid: str):
     ch = st().db.get_chronicle(cid)
@@ -85,7 +128,7 @@ def begin(cid: str):
     """Storyteller-initiated opening turn (character creation and the first scene)."""
     if not st().db.get_chronicle(cid):
         raise HTTPException(404)
-    return StreamingResponse(_sse(st().turn(cid, None)), media_type="text/event-stream")
+    return StreamingResponse(_sse(exclusive(cid, st().turn(cid, None))), media_type="text/event-stream")
 
 
 @app.post("/api/chronicles/{cid}/turn")
@@ -95,7 +138,7 @@ def turn(cid: str, body: Turn):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "empty")
-    return StreamingResponse(_sse(st().turn(cid, text)), media_type="text/event-stream")
+    return StreamingResponse(_sse(exclusive(cid, st().turn(cid, text))), media_type="text/event-stream")
 
 
 @app.post("/api/chronicles/{cid}/end_session")
@@ -111,7 +154,7 @@ def end_session(cid: str):
         "where things stand and what their character might be thinking about until next time."
     )
     return StreamingResponse(
-        _sse(st().turn(cid, "[Session end]", operator_note=note, compact_after=config.COMPACT_AT_SESSION_END)),
+        _sse(exclusive(cid, st().turn(cid, "[Session end]", operator_note=note, compact_after=config.COMPACT_AT_SESSION_END))),
         media_type="text/event-stream",
     )
 
@@ -121,4 +164,4 @@ def compact(cid: str):
     """Condense the chronicle's memory now (the player asked, from the side panel)."""
     if not st().db.get_chronicle(cid):
         raise HTTPException(404)
-    return StreamingResponse(_sse(st().compact(cid, reason="requested")), media_type="text/event-stream")
+    return StreamingResponse(_sse(exclusive(cid, st().compact(cid, reason="requested"))), media_type="text/event-stream")

@@ -216,7 +216,12 @@ class Storyteller:
             betas=[COMPACTION_BETA],
         )
         try:
-            response = self.client.beta.messages.create(**kw)
+            # Streamed like every other request, so the tool definitions are byte-identical
+            # to the ones the kept turns' thinking is bound to.
+            with self.client.beta.messages.stream(**kw) as stream:
+                for _ in stream:
+                    pass
+                response = stream.get_final_message()
         except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
             msg = f"API error {e.status_code}: {e.message}" if isinstance(e, anthropic.APIStatusError) else f"connection error: {e}"
             yield self.db.append_event(chronicle_id, "memory", {"text": f"Memory not condensed ({msg}). Play continues with the full history."})
@@ -294,7 +299,7 @@ class Storyteller:
             else:
                 pending.append(self.db.append_event(chronicle_id, kind, payload))
 
-        ctx = ToolContext(self.db, self.vault, chronicle_id, emit)
+        ctx = ToolContext(self.db, self.vault, chronicle_id, emit, chronicle_name=ch["name"])
 
         player_event = None
         if player_text is not None:

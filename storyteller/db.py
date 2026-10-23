@@ -81,6 +81,13 @@ class DB:
             )
         return self.get_chronicle(cid)
 
+    def delete_chronicle(self, cid: str) -> None:
+        """Remove a chronicle and everything the app stored for it (the vault is untouched)."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE chronicle_id = ?", (cid,))
+            c.execute("DELETE FROM events WHERE chronicle_id = ?", (cid,))
+            c.execute("DELETE FROM chronicles WHERE id = ?", (cid,))
+
     def list_chronicles(self) -> list[dict]:
         with self._conn() as c:
             rows = c.execute("SELECT id, name, campaign, created FROM chronicles ORDER BY created DESC").fetchall()

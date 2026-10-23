@@ -74,6 +74,8 @@
   .onyou li .q { color: var(--muted); font-family: var(--mono); font-size: 12px; }
   .onyou li .loc { margin-left: auto; color: var(--faint); font-size: 11px; text-transform: lowercase; white-space: nowrap; }
   .side-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  #delete { margin-top: 10px; width: 100%; font-size: 12px; padding: 4px 8px; color: var(--muted); }
+  #delete:hover { color: var(--danger); border-color: var(--danger); }
   .muted { color: var(--muted); }
   .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
   .kv div:nth-child(even) { text-align: right; font-family: var(--mono); color: var(--muted); }
@@ -214,6 +216,7 @@
   <div id="present" class="muted">—</div>
   <h2>Table</h2>
   <div class="kv" id="cfg"></div>
+  <button id="delete" class="ghost danger-text" title="Remove this chronicle from the app. Session logs already in the vault stay.">Delete this chronicle</button>
   <details class="fold" id="memoryFold">
     <summary><h2>Memory</h2></summary>
     <div class="meter" id="meter"><div class="sub">No turns yet.</div></div>
@@ -260,7 +263,11 @@ let current = null, busy = false, cfg = null, view = null, turnEl = null, sheetT
 
 async function api(path, opts) {
   const r = await fetch("/api" + path, Object.assign({headers: {"Content-Type": "application/json"}}, opts));
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) {
+    const t = await r.text(); let m = t;
+    try { m = JSON.parse(t).detail || t; } catch (e) {}
+    throw new Error(m);
+  }
   return r;
 }
 function el(cls, html) { const d = document.createElement("div"); d.className = cls; if (html !== undefined) d.innerHTML = html; return d; }
@@ -534,7 +541,8 @@ async function openChronicle(id) {
 
 async function stream(path, body, opts = {}) {
   if (busy) return;
-  busy = true; $("#send").disabled = true; $("#end").disabled = true; const cb = $("#condense"); if (cb) cb.disabled = true;
+  busy = true; $("#send").disabled = true; $("#end").disabled = true; $("#chronicles").disabled = true; $("#new").disabled = true;
+  const cb = $("#condense"); if (cb) cb.disabled = true;
   // A player's move anchors a new turn at the top of the screen; housekeeping (condensing) just appends.
   const t = opts.anchor === false ? (turnEl || startTurn()) : startTurn();
   let live = null, working = null;
@@ -578,7 +586,7 @@ async function stream(path, body, opts = {}) {
   } catch (e) {
     add(el("sys", "⚠ " + esc(e.message)));
   } finally {
-    busy = false; $("#send").disabled = false; $("#end").disabled = false;
+    busy = false; $("#send").disabled = false; $("#end").disabled = false; $("#chronicles").disabled = false; $("#new").disabled = false;
     $("#input").focus({preventScroll: true});
     changed();
   }
@@ -591,6 +599,18 @@ $("#send").onclick = () => {
 $("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#send").click(); } });
 $("#end").onclick = () => { if (current && !busy && confirm("End the session? The Storyteller will write the log to your vault.")) stream(`/chronicles/${current}/end_session`); };
 $("#chronicles").onchange = e => e.target.value && openChronicle(e.target.value);
+$("#delete").onclick = async () => {
+  if (!current || busy) return;
+  const name = $("#chronicles").selectedOptions[0]?.textContent || "this chronicle";
+  if (!confirm(`Delete "${name}"? Its transcript, sheet, possessions and the Storyteller's notes are removed from the app. Session logs already written to your vault stay where they are.`)) return;
+  try {
+    await api("/chronicles/" + current, {method: "DELETE"});
+  } catch (e) { alert(e.message); return; }
+  current = null;
+  const list = await loadChronicles();
+  if (list[0]) { $("#chronicles").value = list[0].id; openChronicle(list[0].id); }
+  else { feed.innerHTML = '<div class="empty">Create or choose a chronicle to begin.</div>'; applyState({scene: {}, view: {empty: true, inventory: {carried: [], stashed: [], count: 0}}, meter: null}); }
+};
 $("#new").onclick = () => { $("#dlgName").value = ""; $("#dlg").showModal(); };
 $("#dlg").addEventListener("close", async () => {
   if ($("#dlg").returnValue !== "ok") return;
