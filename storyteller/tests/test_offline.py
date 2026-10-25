@@ -880,7 +880,20 @@ class ServerApiTests(unittest.TestCase):
                 server.create_chronicle(server.NewChronicle(name="M", game="mage"))
             self.assertEqual(cm.exception.status_code, 400)
             with self.assertRaises(HTTPException):
-                server.create_chronicle(server.NewChronicle(name="X", game="vtm", campaign="nope"))
+                server.create_chronicle(server.NewChronicle(name="X", game="vtm", campaign="nope"))            # with both vaults found, the dialog starts on Vampire unless ST_GAME says otherwise
+            mv = tmp / "Mage Vault"; (mv / "Storyteller Reference").mkdir(parents=True)
+            (mv / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
+            server._st = Storyteller(db, None, FakeClient([]), vaults={"mage": Vault(mv), "vtm": Vault(VAULT)})
+            self.assertEqual(server.default_game(), "vtm")
+            old_default = config.DEFAULT_GAME
+            try:
+                config.DEFAULT_GAME = "mage"
+                self.assertEqual(server.default_game(), "mage")
+                config.DEFAULT_GAME = "werewolf"  # ST_GAME names a game without a vault: ignored
+                self.assertEqual(server.default_game(), "vtm")
+            finally:
+                config.DEFAULT_GAME = old_default
+
         finally:
             server._st = None
             shutil.rmtree(tmp)

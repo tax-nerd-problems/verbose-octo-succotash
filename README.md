@@ -18,7 +18,8 @@ The vault folders can be called whatever you like. The app finds them by a marke
 ```bash
 mkdir Chronicles && cd Chronicles
 git clone https://github.com/tax-nerd-problems/verbose-octo-succotash ai-storyteller
-git clone -b claude/ai-storyteller https://github.com/tax-nerd-problems/cuddly-octo-system "Vampire Vault"   # the vault's marker note is on this branch until it is merged into main
+# The Vampire vault's marker note is only on its claude/ai-storyteller branch for now: the -b is required, or the app will not find the vault.
+git clone -b claude/ai-storyteller https://github.com/tax-nerd-problems/cuddly-octo-system "Vampire Vault"
 git clone https://github.com/tax-nerd-problems/super-disco "Mage Vault"
 cd ai-storyteller
 python3 -m venv .venv
@@ -30,11 +31,13 @@ uvicorn storyteller.server:app --port 8000
 
 Open http://localhost:8000, click **New chronicle**, pick the game, and the Storyteller opens with character creation.
 
+The app starts without an API key, but the first turn fails with an authentication error until `ANTHROPIC_API_KEY` is set. Keys come from the Anthropic Console.
+
 If you already have the Vampire vault folder, you don't need a fresh copy of it. Clone the app (and the Mage vault) into the folder that contains your vault folder, so the three end up side by side. If your vault still has a `storyteller/` folder inside it, read Moving from the old layout below.
 
 ## Playing
 
-- **Your sheet.** The **Sheet** button (top right) opens a full V20 character sheet: attributes, abilities, disciplines, backgrounds, virtues, merits and flaws, Humanity, Willpower, blood pool, health track, and experience. It updates live as the Storyteller changes things.
+- **Your sheet.** The **Sheet** button (top right) opens the full character sheet for the game. Vampire: attributes, abilities, disciplines, backgrounds, virtues, merits and flaws, Humanity, Willpower, blood pool, health track, and experience. Mage: attributes, abilities, Spheres with the affinity mark, Arete, Willpower, the Quintessence and Paradox wheel, health, and experience. It updates live as the Storyteller changes things.
 - **What you're carrying.** The side panel lists what's on you right now, and the sheet's **Possessions** tab shows everything: in hand, worn, pockets, bag, and what's stashed at your haven, in a car, or elsewhere. The Storyteller records every change as the story makes it. Click any gold line in the transcript to jump to the right tab.
 - **Reading at your own pace.** When you send a move, your message moves to the top of the screen and the reply appears beneath it. The page never scrolls by itself while the Storyteller writes. If the reply runs past the bottom, a **New text below** button appears; scroll whenever you like.
 - **Memory meter.** Click **Memory** at the bottom of the side panel to see how much of the chronicle the model is holding in its head right now (its context), when it will next be condensed, what the last turn cost in tokens and how much of it came from cache, and a running cost estimate for the chronicle. It stays folded away unless you open it. The estimate uses the list prices in `storyteller/config.py`; the Usage page in the Anthropic Console is the real bill.
@@ -49,7 +52,7 @@ Where the app looks:
 - **`ST_VAULTS`.** Vault folders anywhere else. Several paths are separated by `:` on Mac/Linux or `;` on Windows, and `mage=/path` pins the game for a folder. Folders listed here win over folders beside the app. (`ST_EXTRA_VAULTS` is an older name for the same setting and still works.)
 - **`VAULT_DIR`.** The older single-vault setting. It still names one vault folder, and a folder it names that has no marker counts as the Vampire vault.
 
-One vault per game. The **New chronicle** dialog offers every game that has a vault, each with its own campaigns; a game whose vault was not found is greyed out. If no vault is found at all, the app still starts and the dialog says so. `ST_GAME` sets the game the dialog starts on; by default it is the first vault found.
+One vault per game. The **New chronicle** dialog offers every game that has a vault, each with its own campaigns; a game whose vault was not found is greyed out. If a game is greyed out that should not be, check that its folder has `AI Storyteller.md` at the top level with the right `game:` line. If no vault is found at all, the app still starts and the dialog says so. `ST_GAME` sets the game the dialog starts on; by default it is Vampire when its vault was found, otherwise the first vault found.
 
 The old layout, with the app folder inside the Vampire vault, still works, so nothing breaks if you have not moved yet.
 
@@ -63,7 +66,7 @@ The dropdown at the top switches between chronicles. Each has its own transcript
 
 ## How it works
 
-- **Cached core.** The game's `prompts/system.md` (under `storyteller/games/<game>/`), the Storyteller Reference folder, the campaign overview and blurb, and the Setting folder are sent as the system prompt on every turn. The prompt is stable, so after the first turn it is read from Anthropic's prompt cache at a fraction of the price.
+- **Cached core.** The game's `prompts/system.md` (under `storyteller/games/<game>/`), the vault's Storyteller Reference and Setting folders, and the campaign's own notes (for Vampire, the Campaign 1 overview and blurb) are sent as the system prompt on every turn. The prompt is stable, so after the first turn it is read from Anthropic's prompt cache at a fraction of the price.
 - **On-demand library.** Everything else in the vault is reachable through tools: `search_vault`, `read_note`, `list_notes`. The Storyteller reads an NPC's note before that NPC speaks.
 - **Honest mechanics.** Dice are rolled by `roll_dice` (V20 rules, 1s cancel, botches, specialties, Willpower), never by the model. The character sheet changes only through `set_sheet` and `update_trait`, and possessions only through `set_inventory` and `update_inventory`. Hidden rolls show the player only "rolled behind the screen".
 - **Memory.** Chat history, the sheet, possessions, the scene, and the Storyteller's private notes live in `storyteller/chronicles.db` inside the app folder (SQLite, gitignored). Private notes hold NPC agendas, clocks, secrets, and a recap.
@@ -107,7 +110,7 @@ Environment variables, all optional:
 | `ST_MODEL` | `claude-opus-5-5` | Model id |
 | `ST_EFFORT` | `medium` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `ST_MAX_TOKENS` | `8000` | Max output tokens per response |
-| `ST_GAME` | the first vault found | Default game in the New chronicle dialog |
+| `ST_GAME` | `vtm` if that vault was found, else the first vault found | Default game in the New chronicle dialog |
 | `ST_VAULTS` | the folders beside the app | Vault folders, see Games and vaults |
 | `ST_EXTRA_VAULTS` | (empty) | Older name for `ST_VAULTS` |
 | `ST_CACHE_TTL` | `1h` | Cache lifetime: `1h`, or `5m` if your turns always come less than five minutes apart |
@@ -124,7 +127,7 @@ To add a campaign, add an entry to the game's `campaigns` in `storyteller/games/
 
 ## Tests
 
-Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, the character sheet display (including older sheet shapes), possessions, upgrading an older database, the token meter, memory condensing and the recap that follows it, and the turn loop against a scripted fake client. Run them from the app folder; they use a small built-in fixture vault under `storyteller/tests/fixtures/vtm` and need no real vault:
+Offline tests (no API key needed) cover the dice, the vault indexer and its write guards, the system prompt build, the character sheet display (including older sheet shapes), possessions, upgrading an older database, the token meter, memory condensing and the recap that follows it, and the turn loop against a scripted fake client. Run them from the app folder with the `.venv` activated; they take a few seconds, use a small built-in fixture vault under `storyteller/tests/fixtures/vtm`, and need no real vault or API key:
 
 ```bash
 python -m unittest storyteller.tests.test_offline -v

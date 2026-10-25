@@ -90,10 +90,12 @@ def get_config():
 
 
 def default_game() -> str:
-    """ST_GAME when its vault was found, else the first game with a vault, else Vampire."""
+    """ST_GAME when its vault was found; else Vampire when its vault was found; else the first game with a vault."""
     vaults = st().vaults
     if config.DEFAULT_GAME in vaults:
         return config.DEFAULT_GAME
+    if "vtm" in vaults:
+        return "vtm"
     return next(iter(vaults), "vtm")
 
 
