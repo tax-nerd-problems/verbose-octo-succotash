@@ -55,34 +55,44 @@ SESSION_LOG_DIR = os.environ.get("ST_SESSION_DIR", "Sessions")
 # the first found wins, in the order ST_VAULTS, VAULT_DIR, the folders beside the app.
 VAULTS = os.environ.get("ST_VAULTS", "") or os.environ.get("ST_EXTRA_VAULTS", "")
 # The first release's single-vault setting. A folder it names counts as Vampire even
-# without a marker, because that release had no marker.
-VAULT_DIR = os.environ.get("VAULT_DIR", "")
+# without a marker, because that release's marker named no game.
+VAULT_DIR = os.environ.get("VAULT_DIR", "").strip()
 MARKER = "AI Storyteller.md"
 
 
+def _unquote(s: str) -> str:
+    """Drop one pair of surrounding quotes: Windows keeps them from `set X="C:\\My Vault"`."""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
+        s = s[1:-1].strip()
+    return s
+
+
 def vault_game(path: Path) -> str | None:
-    """The game id a vault declares in its marker note, or None if it has no marker."""
+    """The game id a vault's marker note declares. None when there is no marker; "" when the
+    marker exists but names no game or could not be read."""
     marker = path / MARKER
     if not marker.is_file():
         return None
     try:
         import frontmatter
-        meta = frontmatter.loads(marker.read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")).metadata
-        g = meta.get("game")
-        return str(g).strip().lower() if g else None
-    except Exception:
-        return None
+        raw = marker.read_bytes().replace(b"\x00", b"").decode("utf-8-sig", errors="replace")  # -sig drops a BOM
+        g = frontmatter.loads(raw).metadata.get("game")
+        if isinstance(g, list) and g:  # an Obsidian List property
+            g = g[0]
+        return str(g).strip().lower() if g else ""
+    except Exception as e:
+        import logging
+        logging.getLogger("storyteller").warning("cannot read %s: %s", marker, e)
+        return ""
 
 
 def vaults_beside_app() -> list[Path]:
-    """The app's own folder (the first release kept the app inside the Vampire vault) and
-    the folders next to it, in name order. Hidden folders are skipped."""
-    out = [APP_ROOT]
+    """The folders next to the app's own folder, in name order. Hidden folders are skipped."""
     try:
-        out += sorted(p for p in APP_ROOT.parent.iterdir() if p.is_dir() and p != APP_ROOT and not p.name.startswith("."))
+        return sorted(p for p in APP_ROOT.parent.iterdir() if p.is_dir() and p != APP_ROOT and not p.name.startswith("."))
     except OSError:
-        pass
-    return out
+        return []
 
 
 def discover_vaults() -> dict[str, Path]:
@@ -94,34 +104,55 @@ def discover_vaults() -> dict[str, Path]:
     log = logging.getLogger("storyteller")
     found: dict[str, Path] = {}
 
+    explicit = ("ST_VAULTS entry", "VAULT_DIR")
+
     def add(path: Path, game: str | None, where: str) -> None:
         if not path.is_dir():
+            if where in explicit:
+                log.warning("%s %s is not a folder; ignored", where, path)
             return
         g = (game or "").strip().lower() or vault_game(path)
-        if not g:
+        if g == "" and not game:  # a marker that names no game, or could not be read
+            if where == "VAULT_DIR" or where == "the app's own folder":
+                g = "vtm"  # the first release's marker named no game and meant Vampire
+            else:
+                log.warning("ignoring %s %s: its %s names no game", where, path, MARKER)
+                return
+        if g is None:  # no marker at all
             if where != "VAULT_DIR":
                 return
             g = "vtm"
         if g not in known:
             log.warning("ignoring %s %s: its marker names an unknown game %r", where, path, g)
             return
-        found.setdefault(g, path.resolve())
+        if g in found:
+            log.info("%s %s also claims %s; using %s", where, path, g, found[g])
+            return
+        found[g] = path.resolve()
 
     for entry in VAULTS.split(os.pathsep):
-        entry = entry.strip()
+        entry = _unquote(entry)
         if not entry:
             continue
         head, sep, tail = entry.partition("=")
-        if sep and head.strip().lower() in known:  # "game=path"; a bare path may itself contain "="
-            add(Path(tail.strip()).expanduser(), head, "ST_VAULTS entry")
+        head = head.strip().lower()
+        if sep and head in known:  # "game=path"; a bare path may itself contain "="
+            add(Path(_unquote(tail)).expanduser(), head, "ST_VAULTS entry")
+        elif sep and head.isidentifier() and Path(_unquote(tail)).expanduser().is_dir():
+            log.warning("ignoring ST_VAULTS entry %s: unknown game %r (known: %s)", entry, head, ", ".join(sorted(known)))
         else:
             add(Path(entry).expanduser(), None, "ST_VAULTS entry")
     if VAULT_DIR:
-        add(Path(VAULT_DIR).expanduser(), None, "VAULT_DIR")
+        add(Path(_unquote(VAULT_DIR)).expanduser(), None, "VAULT_DIR")
+    # The first release kept the app's package inside the Vampire vault, so the app's own
+    # folder may itself be a vault; the usual layout has the vaults next to it.
+    if (APP_ROOT / MARKER).is_file():
+        add(APP_ROOT, None, "the app's own folder")
     for path in vaults_beside_app():
         add(path, None, "folder beside the app")
     if not found:
-        log.warning("no vault found beside %s; see the README on vaults", APP_ROOT)
+        settings = " or ".join(n for n, v in (("ST_VAULTS", VAULTS), ("VAULT_DIR", VAULT_DIR)) if v)
+        log.warning("no vault found beside %s%s; see the README on vaults", APP_ROOT, f" or in {settings}" if settings else "")
     return found
 
 

@@ -669,7 +669,7 @@ fold.addEventListener("toggle", () => { try { localStorage.setItem("st:memory", 
   $("#cfg").innerHTML = `<div>model</div><div>${esc(cfg.model)}</div><div>effort</div><div>${esc(cfg.effort)}</div>${vaultRows}`;
   const withVault = Object.entries(cfg.games).filter(([, g]) => g.vault);
   $("#dlgGame").innerHTML = Object.entries(cfg.games).map(([k, g]) => `<option value="${k}" ${k === cfg.default_game ? "selected" : ""} ${g.vault ? "" : "disabled"}>${esc(g.label)}${g.vault ? "" : " (no vault found)"}</option>`).join("");
-  $("#dlgGameRow").hidden = withVault.length < 2;
+  $("#dlgGameRow").hidden = Object.keys(cfg.games).length < 2;  // a game without a vault stays visible, greyed out
   $("#dlgNoVault").hidden = withVault.length > 0;
   $("#dlg .primary").disabled = withVault.length === 0;
   fillCampaigns();

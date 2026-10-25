@@ -34,8 +34,8 @@ def slug(name: str) -> str:
 
 
 def _read_text(path: Path) -> str:
-    # Some notes carry trailing NUL bytes from a sync tool; strip them.
-    return path.read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")
+    # Some notes carry trailing NUL bytes from a sync tool; strip them. "-sig" drops a Windows Notepad BOM.
+    return path.read_bytes().replace(b"\x00", b"").decode("utf-8-sig", errors="replace")
 
 
 @dataclass
@@ -108,6 +108,7 @@ class Vault:
         alias_index: dict[str, Note] = {}
         for path in sorted(self.root.rglob("*.md")):
             rel = path.relative_to(self.root).as_posix()
+            # "storyteller/": the app's own package when the app still lives inside the vault (old layout); its prompt files are not notes
             if rel.startswith(".") or "/." in rel or rel.startswith("storyteller/"):
                 continue
             try:

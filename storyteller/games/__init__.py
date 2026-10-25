@@ -71,7 +71,6 @@ class GameProfile:
     extra_impls: dict[str, Callable] = field(default_factory=dict)
     morality: Callable[[dict, Callable], dict | None] | None = None  # (sheet, take) -> {"label", "rating"}
     reconcile: Callable[[dict], list[str]] | None = None  # fix up linked values after a change; returns what changed
-    vault_folders: tuple[str, ...] = ()  # for the README/markers only
 
 
 _REGISTRY: dict[str, GameProfile] = {}

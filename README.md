@@ -48,7 +48,7 @@ Each game has its own vault. A vault is any folder that contains an `AI Storytel
 
 Where the app looks:
 
-- **Beside itself.** The app checks the other folders in the parent folder that holds its own folder. That is why the layout above works with no configuration.
+- **Beside itself.** The app checks the other folders in the parent folder that holds its own folder (hidden folders, whose names start with a dot, are skipped). That is why the layout above works with no configuration.
 - **`ST_VAULTS`.** Vault folders anywhere else. Several paths are separated by `:` on Mac/Linux or `;` on Windows, and `mage=/path` pins the game for a folder. Folders listed here win over folders beside the app. (`ST_EXTRA_VAULTS` is an older name for the same setting and still works.)
 - **`VAULT_DIR`.** The older single-vault setting. It still names one vault folder, and a folder it names that has no marker counts as the Vampire vault.
 

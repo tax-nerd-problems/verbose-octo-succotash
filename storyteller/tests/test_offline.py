@@ -1201,6 +1201,42 @@ class MageProfileTests(unittest.TestCase):
                 # the first release's layout: the package inside the Vampire vault, so the app's folder is the vault
                 config.APP_ROOT = home
                 self.assertEqual(config.discover_vaults(), {"vtm": home.resolve(), "mage": sib.resolve()})
+                # ... and the first release's marker named no game at all
+                (home / "AI Storyteller.md").write_text("---\ntags: [VTM, meta]\ntype: tooling\n---\n# x\n")
+                self.assertEqual(config.discover_vaults(), {"vtm": home.resolve(), "mage": sib.resolve()})
+                (home / "AI Storyteller.md").write_text("---\ngame: vtm\n---\n# x\n")
+                config.APP_ROOT = app
+                # a marker that names no game in a folder beside the app is reported, not guessed
+                nogame = tmp / "Nameless"; nogame.mkdir()
+                (nogame / "AI Storyteller.md").write_text("---\ntype: tooling\n---\n# x\n")
+                with self.assertLogs("storyteller", level="WARNING") as logs:
+                    found = config.discover_vaults()
+                self.assertEqual(found, {"vtm": home.resolve(), "mage": sib.resolve()})
+                self.assertTrue(any("Nameless" in line and "names no game" in line for line in logs.output))
+                shutil.rmtree(nogame)
+                # Windows keeps the quotes from set ST_VAULTS="..."; a BOM from Notepad is harmless
+                bom = tmp / "elsewhere" / "Bom"; bom.mkdir()
+                (bom / "AI Storyteller.md").write_bytes(b"\xef\xbb\xbf---\ngame: mage\n---\n# x\n")
+                config.VAULTS = f'"{bom}"'
+                self.assertEqual(config.discover_vaults()["mage"], bom.resolve())
+                config.VAULTS = f"mage='{bom}'"
+                self.assertEqual(config.discover_vaults()["mage"], bom.resolve())
+                # an explicit path that is not a folder, and a game=path with an unknown game, are reported
+                with self.assertLogs("storyteller", level="WARNING") as logs:
+                    config.VAULTS = str(tmp / "missing")
+                    self.assertEqual(config.discover_vaults()["mage"], sib.resolve())
+                    config.VAULTS = f"werewolf={extra}"
+                    self.assertEqual(config.discover_vaults()["mage"], sib.resolve())
+                self.assertTrue(any("is not a folder" in line for line in logs.output))
+                self.assertTrue(any("unknown game 'werewolf'" in line for line in logs.output))
+                config.VAULTS = ""
+                # two folders beside the app claiming one game: the first by name wins, the other is logged
+                twin = tmp / "Zz Vampire"; twin.mkdir()
+                (twin / "AI Storyteller.md").write_text("---\ngame: vtm\n---\n# x\n")
+                with self.assertLogs("storyteller", level="INFO") as logs:
+                    self.assertEqual(config.discover_vaults()["vtm"], home.resolve())
+                self.assertTrue(any("also claims vtm" in line for line in logs.output))
+                shutil.rmtree(twin)
                 # the first release's VAULT_DIR: a folder without a marker counts as Vampire
                 plain = tmp / "elsewhere" / "Plain"; plain.mkdir()
                 lonely = tmp / "lonely" / "app"; lonely.mkdir(parents=True)
