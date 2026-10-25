@@ -33,8 +33,6 @@ def build_system(profile: GameProfile | str, campaign: str, vault_root: Path | N
     """System prompt as a list of text blocks. The whole prefix is stable, so the
     last block carries the cache breakpoint and every turn after the first reads
     it from cache."""
-    if isinstance(profile, str):  # an old caller passing a campaign id
-        profile, campaign = games.get("vtm"), profile
     camp = profile.campaigns[campaign]
     root = Path(vault_root or config.VAULT_DIR)
     parts = [_load(profile.prompts_dir / "system.md")]
@@ -64,7 +62,11 @@ def prefix_hash(system: list[dict], tools: list[dict]) -> str:
 
 
 def profile_of(ch: dict) -> GameProfile:
-    return games.get(ch.get("game") or "vtm")
+    try:
+        return games.get(ch.get("game") or "vtm")
+    except KeyError:
+        log.warning("chronicle %s names an unknown game %r; treating it as vtm", ch.get("id"), ch.get("game"))
+        return games.get("vtm")
 
 
 def public_state(ch: dict) -> dict:
@@ -144,7 +146,7 @@ class Storyteller:
         if vaults is not None:
             self.vaults = dict(vaults)
         elif vault is not None:
-            self.vaults = {"vtm": vault}
+            self.vaults = {config.vault_game(vault.root) or "vtm": vault}
         else:
             self.vaults = {g: Vault(p) for g, p in config.discover_vaults().items()}
         self.client = client or anthropic.Anthropic()
@@ -218,6 +220,9 @@ class Storyteller:
         ch = self.db.get_chronicle(chronicle_id)
         if not ch:
             yield {"kind": "error", "message": "no such chronicle"}
+            return
+        if self.vault_for(ch) is None:
+            yield {"kind": "error", "message": f"no vault is available for the game '{ch.get('game')}'; see the README on vaults"}
             return
         repaired = self._repair_history(ch)
         if repaired:

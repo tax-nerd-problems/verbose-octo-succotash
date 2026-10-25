@@ -18,8 +18,10 @@ class Pool:
     label: str
     max_key: str | None = None
     style: str = "will"
-    max_default: Callable[[dict], int | None] | None = None  # from other sheet values
-    note: Callable[[dict], str | None] | None = None
+    aliases: tuple[str, ...] = ()  # other keys older sheets used for the current value
+    max_aliases: tuple[str, ...] = ()
+    max_default: Callable[[dict, Callable], int | None] | None = None  # (sheet, take) -> max from other values
+    note: Callable[[dict, Callable], str | None] | None = None  # (sheet, take) -> a legend line
 
 
 @dataclass(frozen=True)
@@ -28,8 +30,9 @@ class Group:
     title: str
     key: str
     aliases: tuple[str, ...] = ()
-    fixed: tuple[str, ...] = ()  # always show these names, zero-rated if absent
-    max_dots: int = 5
+    fixed: tuple[str, ...] = ()  # always show these names, zero-rated if absent (Spheres)
+    order: tuple[str, ...] = ()  # canonical names and their display order; absent ones are not shown (Virtues)
+    max_dots: int | None = 5  # None: the sheet's own maximum (generation); 0: a level, not dots (Rituals)
     note_key: str | None = None  # a sheet key naming one trait to mark (e.g. the affinity Sphere)
 
 
@@ -44,8 +47,8 @@ class SheetLayout:
     track_keys: tuple[str, ...] = ()
     wheel: tuple[str, str, int] | None = None  # (left key, right key, size): Quintessence/Paradox
     texts: tuple[tuple[str, str, tuple[str, ...]], ...] = ()  # (key, label, aliases) shown as prose
-    max_dots: Callable[[dict], int] | None = None
-    panel: tuple[str, ...] = ()  # which trackers the side panel shows, by label
+    max_dots: Callable[[dict, Callable], int] | None = None  # (sheet, take) -> dots per trait
+    panel: tuple[str, ...] = ()  # which trackers the side panel shows, by label; "{track}" is the morality/Arete track
 
 
 @dataclass(frozen=True)
@@ -58,14 +61,16 @@ class GameProfile:
     default_campaign: str
     sheet: SheetLayout
     sheet_doc: str  # the layout example in the set_sheet tool description
-    trait_doc: str  # extra guidance in the update_trait description
-    dice_doc: str
+    trait_doc: str  # the example paths in the update_trait description
+    cap_doc: str  # the sentence about limits in the update_trait description (starts with ", " or ". ")
+    dice_doc: str  # the whole roll_dice description
     list_doc: str  # tag examples for list_notes
     state_keys: tuple[str, ...]
     caps: dict[str, Any] = field(default_factory=dict)  # key -> max key, or ("wheel", size, other key)
     extra_tools: tuple[dict, ...] = ()
     extra_impls: dict[str, Callable] = field(default_factory=dict)
     morality: Callable[[dict, Callable], dict | None] | None = None  # (sheet, take) -> {"label", "rating"}
+    reconcile: Callable[[dict], list[str]] | None = None  # fix up linked values after a change; returns what changed
     vault_folders: tuple[str, ...] = ()  # for the README/markers only
 
 

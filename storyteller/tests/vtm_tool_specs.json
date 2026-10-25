@@ -1,0 +1,425 @@
+[
+ {
+  "name": "roll_dice",
+  "description": "Roll a V20 dice pool. Use for every roll in the game, including NPC rolls. Set hidden=true for rolls whose dice the player must not see (NPC Obfuscate, secret Perception checks, etc.). Describe the pool to the player before rolling.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "pool": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 30,
+     "description": "Dice to roll (Attribute + Ability, after wound penalties)."
+    },
+    "difficulty": {
+     "type": "integer",
+     "minimum": 2,
+     "maximum": 10,
+     "description": "Target number. Default 6."
+    },
+    "label": {
+     "type": "string",
+     "description": "What is being rolled, e.g. 'Anja: Charisma + Etiquette vs Rene'."
+    },
+    "specialty": {
+     "type": "boolean",
+     "description": "True if a specialty applies (10s count double)."
+    },
+    "willpower": {
+     "type": "boolean",
+     "description": "True if a Willpower point is spent for an automatic success."
+    },
+    "hidden": {
+     "type": "boolean",
+     "description": "True to keep the dice off the player's screen."
+    }
+   },
+   "required": [
+    "pool",
+    "difficulty",
+    "label"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "read_sheet",
+  "description": "Return the player's current character sheet as JSON.",
+  "input_schema": {
+   "type": "object",
+   "properties": {},
+   "required": [],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "set_sheet",
+  "description": "Replace the player's character sheet. Call once character creation is agreed, or for a large revision. Keep every value you already track. Use this layout (lowercase keys, snake_case for multi-word trait names; include only abilities with dots; secondary abilities go in the matching group):\n{\"name\": \"...\", \"concept\": \"...\", \"clan\": \"...\", \"generation\": 11, \"sire\": \"...\", \"nature\": \"...\", \"demeanor\": \"...\", \"sect\": \"Camarilla\", \"embraced\": \"1999\", \"apparent_age\": \"mid-20s\", \"attributes\": {\"physical\": {\"strength\": 2, \"dexterity\": 3, \"stamina\": 2}, \"social\": {\"charisma\": 3, \"manipulation\": 2, \"appearance\": 4}, \"mental\": {\"perception\": 3, \"intelligence\": 2, \"wits\": 3}}, \"abilities\": {\"talents\": {\"alertness\": 1, \"subterfuge\": 3}, \"skills\": {\"etiquette\": 2, \"animal_ken\": 1}, \"knowledges\": {\"academics\": 1}}, \"specialties\": {\"etiquette\": \"Elysium\"}, \"disciplines\": {\"auspex\": 2, \"presence\": 1}, \"backgrounds\": {\"resources\": 2, \"contacts\": 1}, \"virtues\": {\"conscience\": 3, \"self_control\": 3, \"courage\": 2}, \"merits_flaws\": [{\"name\": \"Eat Food\", \"points\": 1, \"type\": \"merit\"}, {\"name\": \"Haunted\", \"points\": 3, \"type\": \"flaw\"}], \"humanity\": 6, \"willpower\": 3, \"willpower_max\": 3, \"blood\": 10, \"blood_max\": 12, \"health\": {\"bashing\": 0, \"lethal\": 0, \"aggravated\": 0}, \"experience\": {\"unspent\": 0, \"total\": 0}, \"weakness\": \"...\", \"rituals\": [], \"notes\": \"...\"}\nA character on a Path uses \"path\": {\"name\": \"...\", \"rating\": 5} instead of humanity. Possessions are not part of the sheet: track them with set_inventory and update_inventory.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "sheet": {
+     "type": "object",
+     "description": "The full character sheet."
+    }
+   },
+   "required": [
+    "sheet"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "update_trait",
+  "description": "Adjust one value on the player's sheet. Use dotted paths into the sheet layout, e.g. 'blood', 'willpower', 'humanity', 'health.lethal', 'health.aggravated', 'experience.unspent', 'abilities.skills.stealth', 'disciplines.auspex'. Give delta (numeric change) or value (replacement, any JSON type). Numbers never go below 0, and blood and willpower never exceed blood_max and willpower_max. Damage: add to health.bashing, health.lethal or health.aggravated after soak; healing subtracts.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "number",
+     "description": "Amount to add; negative to spend or lose."
+    },
+    "value": {
+     "description": "New value to set instead of a delta."
+    },
+    "reason": {
+     "type": "string",
+     "description": "One line the player will see, e.g. 'Spent 1 blood to heal.'"
+    }
+   },
+   "required": [
+    "path",
+    "reason"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "set_inventory",
+  "description": "Replace the character's whole list of possessions. Use at character creation, or to reconcile the list with the story. Location is one of: held (in hand), worn, pockets, bag (anything carried in a bag, case, or purse), haven, vehicle, elsewhere. Put exactly where in detail (e.g. 'inside jacket pocket', 'glovebox of the Civic', 'safe-deposit box, Chase on 5th'). Use notes for condition, weapon stats, provenance, or anything the player should remember about the item.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "items": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "location": {
+        "type": "string",
+        "enum": [
+         "held",
+         "worn",
+         "pockets",
+         "bag",
+         "haven",
+         "vehicle",
+         "elsewhere"
+        ]
+       },
+       "qty": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "detail": {
+        "type": "string"
+       },
+       "notes": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name",
+       "location"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "reason": {
+     "type": "string",
+     "description": "Optional line for the player, e.g. 'Starting possessions.'"
+    }
+   },
+   "required": [
+    "items"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "update_inventory",
+  "description": "Change one possession, in the same turn the story changes it. Actions: add (gained, bought, stolen, handed over; adds to an identical stack), remove (used up, lost, given away, destroyed; qty removes part of a stack), move (put down, stashed, picked up, changed pocket; qty moves part of a stack), update (change qty, notes or detail, or rename). Refer to an existing item by the id on your screen (e.g. 'i4') or its exact name. Always include a short reason the player will see.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "type": "string",
+     "enum": [
+      "add",
+      "remove",
+      "move",
+      "update"
+     ]
+    },
+    "item": {
+     "type": "string",
+     "description": "For add, the new item's name; otherwise an id like 'i4' or the item's name."
+    },
+    "location": {
+     "type": "string",
+     "enum": [
+      "held",
+      "worn",
+      "pockets",
+      "bag",
+      "haven",
+      "vehicle",
+      "elsewhere"
+     ],
+     "description": "Required for add and move."
+    },
+    "detail": {
+     "type": "string"
+    },
+    "qty": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "notes": {
+     "type": "string"
+    },
+    "rename": {
+     "type": "string"
+    },
+    "reason": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action",
+    "item",
+    "reason"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "set_scene",
+  "description": "Update the table display: where and when the scene is, who is present, and the mood.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "location": {
+     "type": "string"
+    },
+    "time": {
+     "type": "string",
+     "description": "In-fiction date/time, e.g. 'Friday 14 September 2001, 11:40 PM'."
+    },
+    "present": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Named NPCs on screen."
+    },
+    "tension": {
+     "type": "string",
+     "enum": [
+      "calm",
+      "tense",
+      "danger",
+      "frenzy"
+     ]
+    },
+    "note": {
+     "type": "string",
+     "description": "A short player-visible line, e.g. 'Elysium: no violence.'"
+    }
+   },
+   "required": [
+    "location",
+    "time"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "write_st_note",
+  "description": "Store or replace a private Storyteller note under a key. Keys you should maintain: 'recap' (what the next session needs to know), 'npc_agendas', 'clocks', 'secrets', 'threads'. Notes are private; the player never sees them.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "key": {
+     "type": "string"
+    },
+    "text": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "key",
+    "text"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "read_st_notes",
+  "description": "Return all private Storyteller notes, or one by key.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "key": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "search_vault",
+  "description": "Search the campaign vault (NPCs, factions, plots, setting, sourcebooks). Returns the best matching notes with a snippet. Follow up with read_note.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "query": {
+     "type": "string"
+    },
+    "folder": {
+     "type": "string",
+     "description": "Optional folder to restrict to, e.g. 'Characters', 'Clanbook Tremere (Revised)'."
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 20
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "read_note",
+  "description": "Read a vault note by title, alias, or [[wikilink]]. Optionally only one section by heading. Use this before an NPC appears, and for rules you need to adjudicate precisely.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "section": {
+     "type": "string",
+     "description": "Heading text to return only that section."
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "list_notes",
+  "description": "List notes by tag (e.g. 'VTM/npc', 'VTM/malkavian', 'VTM/plot') or by folder. Returns titles and one-line summaries.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "tag": {
+     "type": "string"
+    },
+    "folder": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "write_session_log",
+  "description": "Write a session log into the vault's Sessions folder. Use at the end of a session: what happened, in order; NPCs met and their current disposition; rolls that mattered; threads left open; the character's state at the end. Markdown, with [[wikilinks]] to NPC notes.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "title": {
+     "type": "string",
+     "description": "Short title, e.g. 'Session 1 - The Masquerade'."
+    },
+    "content": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "title",
+    "content"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "append_to_vault_note",
+  "description": "Append a dated chronicle note to an existing vault note (usually an NPC) under a marked 'Chronicle Notes (AI Storyteller)' heading. Use for durable changes: a new relationship, a debt, an injury, a change of allegiance. Never rewrites the original text.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "text": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "text"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ },
+ {
+  "name": "set_character_state",
+  "description": "Set an NPC note's 'char state' frontmatter (alive, dead, torpor, missing, etc.) when it changes in play.",
+  "input_schema": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "state": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "state"
+   ],
+   "additionalProperties": false
+  },
+  "eager_input_streaming": true
+ }
+]

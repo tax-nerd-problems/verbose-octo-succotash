@@ -295,20 +295,27 @@ text_of = text
 generation_of = _generation
 
 
-def _trait_rows(entries: list[dict], max_dots: int, specialties: dict, fixed: tuple[str, ...] = (), mark: str | None = None) -> list[dict]:
-    """Rows for a dotted-trait group: fixed names first (zero if absent), then the rest."""
-    by_key = {}
+def _trait_rows(entries: list[dict], fixed: tuple[str, ...] = (), order: tuple[str, ...] = (), mark: str | None = None) -> list[dict]:
+    """Rows for a dotted-trait group.
+
+    `fixed` names are always shown (zero if absent) in that order; `order` names are
+    canonicalised and sorted in that order but only shown when present; everything
+    else follows in the order the sheet listed it. A trait's own note is kept as is.
+    """
+    by_key: dict[str, dict] = {}
     for e in entries:
         by_key.setdefault(norm(e["name"]), e)
     rows = []
     for name in fixed:
         e = by_key.pop(norm(name), {})
-        rows.append({"name": name, "rating": e.get("rating") or 0, "note": specialties.get(norm(name)) or e.get("note"),
-                     "mark": norm(name) == norm(mark) if mark else False})
+        rows.append({"name": name, "rating": e.get("rating") or 0, "note": e.get("note"), "mark": norm(name) == norm(mark) if mark else False})
+    canon = {norm(n): (i, n) for i, n in enumerate(order)}
+    rest = []
     for key, e in by_key.items():
-        nm = _title(e["name"]) if e["name"].islower() else e["name"]
-        rows.append({"name": nm, "rating": e.get("rating"), "note": specialties.get(key) or e.get("note"),
-                     "mark": key == norm(mark) if mark else False})
+        nm = canon[key][1] if key in canon else (_title(e["name"]) if e["name"].islower() else e["name"])
+        rest.append((canon[key][0] if key in canon else len(order), {"name": nm, "rating": e.get("rating"), "note": e.get("note"), "mark": key == norm(mark) if mark else False}))
+    rest.sort(key=lambda r: r[0])
+    rows.extend(r for _, r in rest)
     return rows
 
 
@@ -339,7 +346,7 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile
             if key == "generation" and _generation(v):
                 v = _ordinal(_generation(v))
             identity.append({"label": label, "value": text(v)})
-    max_trait = layout.max_dots(sheet) if layout.max_dots else 5
+    max_trait = layout.max_dots(sheet, take) if layout.max_dots else 5
 
     # specialties, from a dedicated map or from trait notes
     specialties: dict[str, str] = {}
@@ -415,17 +422,16 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile
         mark = None
         entries = []
         if raw is not None:
-            if isinstance(raw, dict) and g.note_key and g.note_key in raw:
-                mark = str(raw[g.note_key])
-                raw = {k: v for k, v in raw.items() if k != g.note_key}
+            if isinstance(raw, dict) and g.note_key:
+                mv, mk = _field(raw, g.note_key, f"{g.note_key}_sphere", f"{g.note_key}_trait")
+                if mk is not None:
+                    mark = str(mv)
+                    raw = {k: v for k, v in raw.items() if k != mk}
             entries = collect(raw)
         if raw is None and not g.fixed:
             groups.append({"title": g.title, "traits": [], "max": g.max_dots})
             continue
-        rows = _trait_rows(entries, g.max_dots, specialties, g.fixed, mark)
-        if g.fixed and g.title == "Virtues":
-            order = {norm(v): i for i, v in enumerate(g.fixed)}
-            rows.sort(key=lambda e: order.get(norm(e["name"]), 99))
+        rows = _trait_rows(entries, g.fixed, g.order, mark)
         groups.append({"title": g.title, "traits": rows, "max": g.max_dots, "mark_label": g.note_key})
 
     # merits & flaws
@@ -441,16 +447,18 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile
     if profile.morality:
         track = profile.morality(sheet, take)
     elif layout.track_label:
-        v = take(*layout.track_keys)
-        if v is not None:
-            track = {"label": layout.track_label, "rating": _rating(v)}
+        v, used_key = _field(sheet, *layout.track_keys)
+        if used_key is not None:
+            used.add(used_key)
+            label = "Enlightenment" if norm(used_key) == "enlightenment" else layout.track_label
+            track = {"label": label, "rating": _rating(v)}
     if track:
         track["max"] = 10
 
     pools = []
     for pool in layout.pools:
-        v = take(pool.key)
-        mx_v = take(pool.max_key) if pool.max_key else None
+        v = take(pool.key, *pool.aliases)
+        mx_v = take(pool.max_key, *pool.max_aliases) if pool.max_key else None
         if isinstance(v, dict):
             cur = _as_int(_field(v, "temporary", "current", "pool", "points")[0])
             mx = _as_int(_field(v, "permanent", "max", "maximum", "rating")[0])
@@ -459,11 +467,11 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile
         else:
             cur, mx = _as_int(v), _as_int(mx_v)
         if mx is None and pool.max_default:
-            mx = pool.max_default(sheet)
+            mx = pool.max_default(sheet, take)
         if cur is None:
             cur = mx
         pools.append({"key": pool.key, "label": pool.label, "current": cur, "max": mx if mx is not None else cur, "style": pool.style,
-                      "note": pool.note(sheet) if pool.note else None})
+                      "note": pool.note(sheet, take) if pool.note else None})
 
     wheel = None
     if layout.wheel:
@@ -500,7 +508,7 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile
     for pl in pools:
         candidates[pl["label"]] = {"label": pl["label"], "kind": "boxes", "current": pl["current"], "max": pl["max"], "style": pl["style"]}
     if track:
-        candidates[track["label"]] = {"label": track["label"], "kind": "boxes", "current": track["rating"], "max": 10, "style": "will"}
+        candidates["{track}"] = {"label": track["label"], "kind": "track", "current": track["rating"], "max": 10, "style": "will"}
     if wheel:
         candidates[wheel["left"]["label"]] = {"label": wheel["left"]["label"], "kind": "bar", "current": wheel["left"]["current"], "max": wheel["size"], "style": "quint"}
         candidates[wheel["right"]["label"]] = {"label": wheel["right"]["label"], "kind": "bar", "current": wheel["right"]["current"], "max": wheel["size"], "style": "paradox"}

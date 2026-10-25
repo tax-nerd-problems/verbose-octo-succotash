@@ -801,6 +801,30 @@ from storyteller import server  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 
+class ServerApiTests(unittest.TestCase):
+    def test_config_and_creation(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            db = DB(tmp / "t.db")
+            server._st = Storyteller(db, Vault(VAULT), FakeClient([]))
+            cfg = server.get_config()
+            self.assertEqual(set(cfg["games"]), {"vtm", "mage"})
+            self.assertTrue(cfg["games"]["vtm"]["vault"])
+            self.assertIsNone(cfg["games"]["mage"]["vault"])
+            self.assertEqual(cfg["default_game"], "vtm")
+            ch = server.create_chronicle(server.NewChronicle(name="A"))
+            self.assertEqual((ch["game"], ch["campaign"]), ("vtm", "campaign1"))
+            self.assertNotIn("notes", ch)
+            with self.assertRaises(HTTPException) as cm:
+                server.create_chronicle(server.NewChronicle(name="M", game="mage"))
+            self.assertEqual(cm.exception.status_code, 400)
+            with self.assertRaises(HTTPException):
+                server.create_chronicle(server.NewChronicle(name="X", game="vtm", campaign="nope"))
+        finally:
+            server._st = None
+            shutil.rmtree(tmp)
+
+
 class ServerLockTests(unittest.TestCase):
     def test_second_turn_on_same_chronicle_is_refused_until_the_first_ends(self):
         def gen():
@@ -862,6 +886,60 @@ MAGE_SHEET = {
 }
 
 
+class VtmCompatibilityTests(unittest.TestCase):
+    """The VTM game must keep the exact pre-profile behaviour: wording changes reset chronicles' stored reasoning."""
+
+    def test_vtm_tool_text_is_pinned(self):
+        pinned = json.loads((Path(__file__).parent / "vtm_tool_specs.json").read_text())
+        self.assertEqual(tools.tool_specs(games.get("vtm")), pinned)
+        self.assertEqual(TOOL_SPECS, pinned)
+
+    def test_sheet_aliases_and_path_characters(self):
+        v = sheet_view({"name": "Vik", "clan": "Lasombra", "generation": 7, "vitae": 12, "max_blood_pool": 20, "blood_per_turn": 4,
+                        "willpower": 4, "permanent_willpower": 8, "path": {"name": "Path of Night", "rating": 6},
+                        "virtues": {"courage": 4, "instinct": 3, "conviction": 2},
+                        "disciplines": {"obtenebration": 6, "potence": 3}, "rituals": ["Rite of the Blood Mirror"]})
+        pools = {p["label"]: p for p in v["status"]["pools"]}
+        self.assertEqual((pools["Blood pool"]["current"], pools["Blood pool"]["max"], pools["Blood pool"]["note"]), (12, 20, "Spend up to 4 per turn"))
+        self.assertEqual((pools["Willpower"]["current"], pools["Willpower"]["max"]), (4, 8))
+        self.assertEqual(v["extras"], [])  # blood_per_turn was consumed by the legend, not shown twice
+        groups = {g["title"]: g for g in v["groups"]}
+        self.assertEqual([t["name"] for t in groups["Virtues"]["traits"]], ["Conviction", "Instinct", "Courage"])  # no phantom rows, canonical order
+        self.assertIsNone(groups["Disciplines"]["max"])  # dots follow the generation maximum (6 here)
+        self.assertEqual(v["max_dots"], 6)
+        self.assertEqual(groups["Rituals"]["max"], 0)
+        self.assertEqual([t["label"] for t in v["panel"]], ["Blood pool", "Willpower", "Path of Night", "Health"])
+        self.assertEqual(v["panel"][2]["kind"], "track")
+        self.assertEqual(v["status"]["track"], {"label": "Path of Night", "rating": 6, "max": 10})
+
+    def test_group_notes_are_the_traits_own(self):
+        v = sheet_view({"name": "A", "specialties": {"auspex": "Aura reading"}, "disciplines": {"auspex": {"rating": 2, "powers": "Heightened Senses, Aura Perception"}}})
+        aus = next(t for g in v["groups"] if g["title"] == "Disciplines" for t in g["traits"])
+        self.assertEqual(aus["note"], "Heightened Senses, Aura Perception")
+
+    def test_old_database_without_game_column(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            path = tmp / "old.db"
+            c = sqlite3.connect(path)
+            c.executescript("""
+                CREATE TABLE chronicles (id TEXT PRIMARY KEY, name TEXT NOT NULL, campaign TEXT NOT NULL, created TEXT NOT NULL,
+                    sheet TEXT NOT NULL DEFAULT '{}', scene TEXT NOT NULL DEFAULT '{}', notes TEXT NOT NULL DEFAULT '{}');
+                CREATE TABLE messages (chronicle_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY (chronicle_id, seq));
+                CREATE TABLE events (chronicle_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (chronicle_id, seq));
+                INSERT INTO chronicles (id, name, campaign, created) VALUES ('old1', 'Old', 'campaign1', '2026-10-19');
+            """)
+            c.commit(); c.close()
+            db = DB(path)
+            ch = db.get_chronicle("old1")
+            self.assertEqual(ch["game"], "vtm")
+            self.assertEqual(stmod.profile_of(ch).id, "vtm")
+            self.assertEqual(ToolContext(db, None, "old1", lambda *a: None).profile.id, "vtm")
+            self.assertEqual(stmod.profile_of({"id": "x", "game": "no-such-game"}).id, "vtm")  # unknown game: fall back, don't crash
+        finally:
+            shutil.rmtree(tmp)
+
+
 class MageProfileTests(unittest.TestCase):
     def test_registry_and_tools(self):
         self.assertEqual(sorted(games.all_games()), ["mage", "vtm"])
@@ -887,6 +965,12 @@ class MageProfileTests(unittest.TestCase):
         self.assertEqual(v["status"]["wheel"]["size"], 20)
         self.assertEqual([t["label"] for t in v["panel"]], ["Arete", "Willpower", "Quintessence", "Paradox", "Health"])
         self.assertEqual([t["label"] for t in v["status"]["texts"]], ["Instruments"])
+        # the affinity key may be spelled differently; a Technocrat's track is Enlightenment
+        v2 = sheet_view({"name": "T", "enlightenment": 3, "spheres": {"Affinity_Sphere": "Mind", "mind": 2}}, None, games.get("mage"))
+        sph = {t["name"]: t for g in v2["groups"] if g["title"] == "Spheres" for t in g["traits"]}
+        self.assertTrue(sph["Mind"]["mark"])
+        self.assertEqual(len(sph), 9)
+        self.assertEqual(v2["status"]["track"]["label"], "Enlightenment")
         skills = {t["name"]: t["rating"] for t in v["abilities"][1]["traits"]}
         self.assertEqual(skills["Technology"], 3)
         self.assertIn("Martial Arts", skills)
@@ -894,15 +978,22 @@ class MageProfileTests(unittest.TestCase):
         self.assertEqual(v["extras"], [])
 
     def test_magick_difficulty(self):
+        self.assertEqual(mage.DIFFICULTY_CEILING, 10)  # M20 default; the optional Thresholds rule is 9
         self.assertEqual(mage.magick_difficulty(2, "coincidental"), (5, 0))
         self.assertEqual(mage.magick_difficulty(3, "vulgar_witnessed"), (8, 0))
-        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed"), (9, 1))
+        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed"), (10, 0))
         self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed", quintessence_spent=3), (7, 0))  # Quintessence lowers the raw difficulty
-        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed", quintessence_spent=1), (9, 0))
         self.assertEqual(mage.magick_difficulty(1, "coincidental", quintessence_spent=3), (3, 0))
+        with self.assertRaises(ValueError):
+            mage.magick_difficulty(2, "vulgar")
+        # the M20 Paradox table: coincidental botch = Sphere; vulgar unseen 1 / 1+Sphere; vulgar seen 2 / 2+2*Sphere
         self.assertEqual(mage.paradox_for("coincidental", "success", 3), 0)
-        self.assertEqual(mage.paradox_for("coincidental", "botch", 3), 1)
-        self.assertEqual(mage.paradox_for("vulgar_witnessed", "success", 3), 4)
+        self.assertEqual(mage.paradox_for("coincidental", "botch", 3), 3)
+        self.assertEqual(mage.paradox_for("vulgar_unwitnessed", "success", 3), 1)
+        self.assertEqual(mage.paradox_for("vulgar_unwitnessed", "botch", 3), 4)
+        self.assertEqual(mage.paradox_for("vulgar_witnessed", "success", 3), 2)
+        self.assertEqual(mage.paradox_for("vulgar_witnessed", "botch", 3), 8)
+        self.assertEqual(mage.paradox_for("vulgar_witnessed", "failure", 3), 0)
 
     def test_roll_magick_applies_quintessence_and_paradox(self):
         import storyteller.dice as d
@@ -922,25 +1013,54 @@ class MageProfileTests(unittest.TestCase):
             events = []
             ctx = ToolContext(db, None, ch["id"], lambda k, p: events.append((k, p)))
             self.assertEqual(ctx.profile.id, "mage")
-            d._rng = FakeRng([8, 9])  # arete 2, vulgar witnessed with Forces 2 -> diff 7
+            d._rng = FakeRng([8, 9])  # arete 2, vulgar witnessed with Forces 2 -> diff 7, Quintessence 1 -> 6
             out = json.loads(ctx.run("roll_magick", {"arete": 2, "highest_sphere": 2, "kind": "vulgar_witnessed",
                                                      "successes_needed": 2, "label": "Lightning from the oscillator", "quintessence_spent": 1}))
             self.assertEqual((out["difficulty"], out["needed"], out["outcome"]), (6, 2, "success"))
-            self.assertEqual(out["paradox_gained"], 3)
+            self.assertEqual(out["paradox_gained"], 2)
             sheet = db.get_chronicle(ch["id"])["sheet"]
-            self.assertEqual((sheet["quintessence"], sheet["paradox"]), (3, 5))
+            self.assertEqual((sheet["quintessence"], sheet["paradox"]), (3, 4))
+            self.assertEqual((out["quintessence"], out["paradox"]), (3, 4))
             dice_ev = next(p for k, p in events if k == "dice")
             self.assertTrue(dice_ev["magick"])
-            self.assertEqual(dice_ev["paradox_gained"], 3)
+            self.assertEqual(dice_ev["paradox_gained"], 2)
             d._rng = FakeRng([1, 2])
             out = json.loads(ctx.run("roll_magick", {"arete": 2, "highest_sphere": 1, "kind": "coincidental", "successes_needed": 1, "label": "x"}))
             self.assertEqual(out["outcome"], "botch")
-            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["paradox"], 6)
-            # the wheel cap: quintessence cannot exceed 20 - paradox
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["paradox"], 5)
+            # an NPC's roll (hidden) never touches the player's sheet or shows dice
+            before = dict(db.get_chronicle(ch["id"])["sheet"]); events.clear()
+            d._rng = FakeRng([10, 10, 10])
+            out = json.loads(ctx.run("roll_magick", {"arete": 3, "highest_sphere": 3, "kind": "vulgar_witnessed", "successes_needed": 1,
+                                                     "label": "The Technocrat fires", "quintessence_spent": 3, "hidden": True}))
+            self.assertEqual(out["paradox_gained"], 2)
+            self.assertIn("NPC", out["sheet"])
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"], before)
+            self.assertEqual([k for k, _ in events], ["dice"])
+            self.assertTrue(next(p for k, p in events)["hidden"])
+            # Quintessence the mage does not have cannot be spent
+            db.set_sheet(ch["id"], {**before, "quintessence": "1"})
+            d._rng = FakeRng([9, 9])
+            out = json.loads(ctx.run("roll_magick", {"arete": 2, "highest_sphere": 2, "kind": "coincidental", "successes_needed": 1, "label": "x", "quintessence_spent": 3}))
+            self.assertEqual((out["difficulty"], out["quintessence_spent"]), (4, 1))
+            self.assertIn("only 1 Quintessence", out["quintessence_reduced"])
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["quintessence"], 0)
+            # the wheel: Quintessence cannot exceed 20 - Paradox, and incoming Paradox pushes Quintessence out
+            db.set_sheet(ch["id"], {**before, "quintessence": 14, "paradox": 5})
             out = json.loads(ctx.run("update_trait", {"path": "quintessence", "delta": 30, "reason": "Drank a Node dry"}))
-            self.assertEqual((out["new"], out.get("clamped")), (14, True))
+            self.assertEqual((out["new"], out.get("clamped")), (15, True))
+            out = json.loads(ctx.run("update_trait", {"path": "paradox", "delta": 10, "reason": "Backlash deferred"}))
+            self.assertEqual(out["new"], 15)
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["quintessence"], 5)
+            self.assertIn("pushed", out["also"][0])
+            out = json.loads(ctx.run("update_trait", {"path": "paradox", "value": 23, "reason": "Catastrophe"}))
+            self.assertTrue(any("backlash" in a for a in out["also"]))
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["quintessence"], 0)
             with self.assertRaises(ValueError):
                 ctx.run("roll_dice", {"pool": 3, "difficulty": 6, "label": "x", "kind": "coincidental"})
+            with self.assertRaises(ValueError) as cm:
+                ctx.run("roll_magick", {"arete": 2, "highest_sphere": 2, "kind": "vulgar", "successes_needed": 1, "label": "x"})
+            self.assertIn("must be one of", str(cm.exception))
         finally:
             d._rng = __import__("random").SystemRandom()
             shutil.rmtree(tmp)
@@ -964,6 +1084,8 @@ class MageProfileTests(unittest.TestCase):
             system_text = "\n".join(b["text"] for b in kw["system"])
             self.assertIn("Paradox hurts.", system_text)
             self.assertNotIn("Eleazar", system_text)
+            self.assertNotIn("placeholder", system_text)
+            self.assertIn("roll_magick", kw["system"][0]["text"])  # the Mage persona prompt, not a stub
             self.assertTrue(any(e["kind"] == "dice" and e.get("magick") for e in events))
             # a chronicle whose game has no vault is refused clearly
             db2 = DB(tmp / "t2.db")
@@ -992,6 +1114,14 @@ class MageProfileTests(unittest.TestCase):
                 self.assertEqual(config.discover_vaults()["mage"], extra.resolve())  # explicit paths win over siblings
                 config.EXTRA_VAULTS = f"mage={extra}"
                 self.assertEqual(config.discover_vaults()["mage"], extra.resolve())
+                odd = tmp / "a=b"; odd.mkdir()
+                (odd / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
+                config.EXTRA_VAULTS = str(odd)
+                self.assertEqual(config.discover_vaults()["mage"], odd.resolve())  # a path containing "=" is still a path
+                bogus = tmp / "Bogus"; bogus.mkdir()
+                (bogus / "AI Storyteller.md").write_text("---\ngame: werewolf\n---\n# x\n")
+                config.EXTRA_VAULTS = ""
+                self.assertNotIn("werewolf", config.discover_vaults())  # an unknown game is ignored, not offered
             finally:
                 config.VAULT_DIR, config.EXTRA_VAULTS = old
         finally:

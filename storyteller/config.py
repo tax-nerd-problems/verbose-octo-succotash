@@ -72,26 +72,42 @@ def vault_game(path: Path) -> str | None:
 
 def discover_vaults() -> dict[str, Path]:
     """game id -> vault path. The home vault counts as VTM unless its marker says otherwise."""
+    from . import games
+    known = set(games.all_games())
     found: dict[str, Path] = {}
     home = VAULT_DIR
-    found[vault_game(home) or "vtm"] = home
+    home_game = vault_game(home)
+    if home_game and home_game not in known:
+        import logging
+        logging.getLogger("storyteller").warning("the home vault's marker names an unknown game %r; treating it as vtm", home_game)
+        home_game = None
+    found[home_game or "vtm"] = home
+
+    def add(path: Path, game: str | None, where: str) -> None:
+        g = (game or "").strip().lower() or vault_game(path)
+        if not path.is_dir() or not g:
+            return
+        if g not in known:
+            import logging
+            logging.getLogger("storyteller").warning("ignoring %s %s: its marker names an unknown game %r", where, path, g)
+            return
+        found.setdefault(g, path.resolve())
+
     for entry in EXTRA_VAULTS.split(os.pathsep):
         entry = entry.strip()
         if not entry:
             continue
-        game, _, raw = entry.rpartition("=") if "=" in entry else ("", "", entry)
-        path = Path(raw).expanduser().resolve()
-        g = (game.strip().lower() or vault_game(path)) if path.is_dir() else None
-        if g and g not in found:
-            found[g] = path
+        head, sep, tail = entry.partition("=")
+        if sep and head.strip().lower() in known:  # "game=path"; a bare path may itself contain "="
+            add(Path(tail).expanduser(), head, "ST_EXTRA_VAULTS entry")
+        else:
+            add(Path(entry).expanduser(), None, "ST_EXTRA_VAULTS entry")
     try:
         siblings = sorted(p for p in home.parent.iterdir() if p.is_dir() and p != home)
     except OSError:
         siblings = []
     for path in siblings:
-        g = vault_game(path)
-        if g and g not in found:
-            found[g] = path.resolve()
+        add(path, None, "sibling vault")
     return found
 
 

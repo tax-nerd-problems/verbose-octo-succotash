@@ -401,7 +401,8 @@ function renderSide(v) {
     let h = `<div class="name">${esc(v.name)}</div><div class="sub">${esc(v.subtitle)}</div>`;
     for (const t of v.panel || []) {
       const vis = t.kind === "bar" ? minibar(t.current, t.max, t.style) : boxes(t.current, t.max, t.style);
-      const val = t.text ? esc(t.text) : `${t.current ?? "?"}${t.max && t.kind !== "dots" && t.label !== "Humanity" && t.label !== "Arete" && !(t.max === 10 && t.style === "will" && t.label !== "Willpower") ? "/" + t.max : ""}`;
+      // a track (Humanity, a Path, Arete) is a rating; everything else is current/max
+      const val = t.text ? esc(t.text) : t.kind === "track" ? `${t.current ?? "?"}` : `${t.current ?? "?"}/${t.max ?? "?"}`;
       h += `<div class="trk"><span>${esc(t.label)}</span>${vis}<span class="v">${val}</span></div>`;
     }
     who.innerHTML = h;
@@ -446,8 +447,10 @@ function characterTab(v) {
   const groups = (v.groups || []).filter(g => g.traits.length);
   const groupRow = (t, g) => {
     const name = esc(t.name) + (t.mark ? `<span class="tag">${esc(g.mark_label || "affinity")}</span>` : "");
-    const right = g.max === 0 ? (t.rating != null ? `<span class="dots">Lv ${t.rating}</span>` : "") : dots(t.rating, g.max || md);
-    return `<div class="row${t.rating ? "" : " zero"}"><span class="nm">${name}${t.note ? `<small>${esc(t.note)}</small>` : ""}</span>${right}</div>`;
+    const max = g.max == null ? md : g.max;  // null: the sheet's own maximum (generation); 0: a level, not dots
+    const right = max === 0 ? (t.rating != null ? `<span class="dots">Lv ${t.rating}</span>` : "") : dots(t.rating, max);
+    const zero = max === 0 ? false : !t.rating;
+    return `<div class="row${zero ? " zero" : ""}"><span class="nm">${name}${t.note ? `<small>${esc(t.note)}</small>` : ""}</span>${right}</div>`;
   };
   if (groups.length) h += `<div class="sec"><h3>Advantages</h3><div class="cols">${groups.map(g => col(g.title, g.traits.map(t => groupRow(t, g)).join(""))).join("")}</div></div>`;
   // status row
@@ -546,7 +549,8 @@ function renderMeter(m) {
 function applyState(st) {
   view = st.view; renderSide(view); renderScene(st.scene); renderMeter(st.meter);
   const gp = $("#gamePill"); const g = cfg && st.game && cfg.games[st.game];
-  gp.hidden = !g || Object.values(cfg.games).filter(x => x.vault).length < 2; if (g) gp.textContent = g.short;
+  const several = cfg && Object.values(cfg.games).filter(x => x.vault).length >= 2;
+  gp.hidden = !g || !(several || !g.vault); if (g) { gp.textContent = g.short + (g.vault ? "" : " · no vault"); gp.title = g.vault ? g.label : g.label + ": no vault found for this game"; }
   if ($("#sheetDlg").open) renderSheetDlg();
 }
 

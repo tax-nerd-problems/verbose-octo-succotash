@@ -12,7 +12,7 @@ from typing import Any
 from . import dice, games
 from .db import DB
 from .games import GameProfile
-from .sheet import LOCATION_KEYS, LOCATION_LABELS, _location
+from .sheet import LOCATION_KEYS, LOCATION_LABELS, _location, as_int as _as_int
 from .vault import Vault
 
 
@@ -25,11 +25,11 @@ def tool_specs(profile: GameProfile) -> list[dict]:
     specs = [json.loads(json.dumps(t)) for t in _BASE_SPECS]  # deep copy
     for t in specs:
         if t["name"] == "roll_dice":
-            t["description"] = profile.dice_doc + " " + t["description"]
+            t["description"] = t["description"].replace("{DICE_DOC}", profile.dice_doc)
         elif t["name"] == "set_sheet":
             t["description"] = t["description"].replace("{SHEET_DOC}", profile.sheet_doc)
         elif t["name"] == "update_trait":
-            t["description"] = t["description"].replace("{TRAIT_DOC}", profile.trait_doc)
+            t["description"] = t["description"].replace("{TRAIT_DOC}", profile.trait_doc).replace("{CAP_DOC}", profile.cap_doc)
         elif t["name"] == "list_notes":
             t["description"] = t["description"].replace("{LIST_DOC}", profile.list_doc)
     specs.extend(json.loads(json.dumps(t)) for t in profile.extra_tools)
@@ -41,10 +41,7 @@ def tool_specs(profile: GameProfile) -> list[dict]:
 _BASE_SPECS: list[dict] = [
     {
         "name": "roll_dice",
-        "description": (
-            "Set hidden=true for rolls whose dice the player must not see (NPC powers, "
-            "secret Perception checks, etc.). Describe the pool to the player before rolling."
-        ),
+        "description": "{DICE_DOC}",
         "input_schema": _schema(
             {
                 "pool": {"type": "integer", "minimum": 0, "maximum": 30, "description": "Dice to roll (Attribute + Ability, after wound penalties)."},
@@ -68,7 +65,7 @@ _BASE_SPECS: list[dict] = [
             "Replace the player's character sheet. Call once character creation is agreed, or for a large "
             "revision. Keep every value you already track. Use this layout (lowercase keys, snake_case for "
             "multi-word trait names; include only abilities with dots; secondary abilities go in the matching group):\n"
-            "{SHEET_DOC}\n"
+            "{SHEET_DOC} "
             "Possessions are not part of the sheet: track them with set_inventory and update_inventory."
         ),
         "input_schema": _schema({"sheet": {"type": "object", "description": "The full character sheet."}}, ["sheet"]),
@@ -77,7 +74,7 @@ _BASE_SPECS: list[dict] = [
         "name": "update_trait",
         "description": (
             "Adjust one value on the player's sheet. Use dotted paths into the sheet layout, {TRAIT_DOC} "
-            "Give delta (numeric change) or value (replacement, any JSON type). Numbers never go below 0. "
+            "Give delta (numeric change) or value (replacement, any JSON type). Numbers never go below 0{CAP_DOC} "
             "Damage: add to health.bashing, health.lethal or health.aggravated after soak; healing subtracts."
         ),
         "input_schema": _schema(
@@ -281,6 +278,8 @@ class ToolContext:
             }.get(t)
             if ok and not ok(v):
                 return f"field {k!r} should be {t}"
+            if "enum" in prop and v not in prop["enum"]:
+                return f"field {k!r} must be one of {prop['enum']}"
         return None
 
     def run(self, name: str, args: dict) -> str:
@@ -349,29 +348,32 @@ class ToolContext:
                 raise ValueError(f"'{path}' is {json.dumps(old)}, not a number; use value instead of delta")
             new = (old or 0) + delta
             new = int(new) if float(new).is_integer() else new
-            if new < 0:
-                new, clamped = 0, True
-            cap = self.profile.caps.get(leaf) if len(parts) == 1 else None
-            if isinstance(cap, str):
-                limit = sheet.get(cap)
-            elif isinstance(cap, tuple) and cap[0] == "wheel":
-                other = sheet.get(cap[2])
-                limit = cap[1] - (other if isinstance(other, (int, float)) else 0)
-            else:
-                limit = None
-            if isinstance(limit, (int, float)) and new > limit:
-                new, clamped = limit, True
         elif value is not None:
             new = value
         else:
             raise ValueError("provide delta or value")
+        if isinstance(new, (int, float)) and not isinstance(new, bool):
+            if new < 0:
+                new, clamped = 0, True
+            cap = self.profile.caps.get(leaf) if len(parts) == 1 else None
+            if isinstance(cap, str):
+                limit = _as_int(sheet.get(cap))
+            elif isinstance(cap, tuple) and cap[0] == "wheel":
+                limit = cap[1] - (_as_int(sheet.get(cap[2])) or 0)
+            else:
+                limit = None
+            if limit is not None and new > limit:
+                new, clamped = limit, True
         node[leaf] = new
+        also = self.profile.reconcile(sheet) if self.profile.reconcile else []
         self.db.set_sheet(self.cid, sheet)
-        self.emit("trait", {"path": path, "old": old, "new": new, "reason": reason})
+        self.emit("trait", {"path": path, "old": old, "new": new, "reason": reason + (" (" + "; ".join(also) + ")" if also else "")})
         self.emit("state", {})
         out = {"path": path, "old": old, "new": new}
         if clamped:
             out["clamped"] = True
+        if also:
+            out["also"] = also
         return json.dumps(out)
 
     # ---------- possessions ----------

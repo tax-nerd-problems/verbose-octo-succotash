@@ -16,23 +16,23 @@ GENERATION_TABLE = {
 
 
 def _generation(sheet: dict) -> int | None:
-    from ...sheet import generation_of
-    return generation_of(sheet.get("generation"))
+    from ...sheet import field_of, generation_of
+    return generation_of(field_of(sheet, "generation")[0])
 
 
-def _max_dots(sheet: dict) -> int:
+def _max_dots(sheet: dict, take) -> int:
     g = _generation(sheet)
     return GENERATION_TABLE.get(g, (5,))[0] if g else 5
 
 
-def _blood_max(sheet: dict) -> int | None:
+def _blood_max(sheet: dict, take) -> int | None:
     g = _generation(sheet)
     return GENERATION_TABLE[g][1] if g in GENERATION_TABLE else None
 
 
-def _blood_note(sheet: dict) -> str | None:
+def _blood_note(sheet: dict, take) -> str | None:
     from ...sheet import as_int
-    pt = as_int(sheet.get("blood_per_turn") or sheet.get("blood_per_round"))
+    pt = as_int(take("blood_per_turn", "blood_per_round"))
     if pt is None:
         g = _generation(sheet)
         pt = GENERATION_TABLE[g][2] if g in GENERATION_TABLE else None
@@ -72,21 +72,23 @@ SHEET = SheetLayout(
         ("Knowledges", ("Academics", "Computer", "Finance", "Investigation", "Law", "Medicine", "Occult", "Politics", "Science", "Technology")),
     ),
     groups=(
-        Group("Disciplines", "disciplines", ("discipline",)),
-        Group("Paths", "paths", ("thaumaturgy_paths", "thaumaturgy")),
+        Group("Disciplines", "disciplines", ("discipline",), max_dots=None),
+        Group("Paths", "paths", ("thaumaturgy_paths", "thaumaturgy"), max_dots=None),
         Group("Rituals", "rituals", (), max_dots=0),
         Group("Backgrounds", "backgrounds", ("background",)),
-        Group("Virtues", "virtues", ("virtue",), fixed=("Conscience", "Self-Control", "Courage")),
+        Group("Virtues", "virtues", ("virtue",), order=("Conscience", "Conviction", "Self-Control", "Instinct", "Courage")),
     ),
     pools=(
-        Pool("willpower", "Willpower", "willpower_max", "will"),
-        Pool("blood", "Blood pool", "blood_max", "blood", max_default=_blood_max, note=_blood_note),
+        Pool("willpower", "Willpower", "willpower_max", "will",
+             max_aliases=("willpower_permanent", "max_willpower", "permanent_willpower")),
+        Pool("blood", "Blood pool", "blood_max", "blood", aliases=("blood_pool", "bloodpool", "vitae"),
+             max_aliases=("blood_pool_max", "max_blood", "max_blood_pool"), max_default=_blood_max, note=_blood_note),
     ),
     subtitle=("clan", "generation", "concept"),
     track_label=None,  # morality comes from the hook below (Humanity or a Path)
     texts=(("weakness", "Weakness", ("clan_weakness", "clan_flaw")),),
     max_dots=_max_dots,
-    panel=("Blood pool", "Willpower", "Humanity", "Health"),
+    panel=("Blood pool", "Willpower", "{track}", "Health"),
 )
 
 SHEET_DOC = (
@@ -106,7 +108,7 @@ SHEET_DOC = (
     '"health": {"bashing": 0, "lethal": 0, "aggravated": 0}, '
     '"experience": {"unspent": 0, "total": 0}, "weakness": "...", "rituals": [], "notes": "..."}\n'
     'A character on a Path uses "path": {"name": "...", "rating": 5} instead of humanity.'
-)
+)  # byte-identical to the pre-profile set_sheet text: changing it resets every VTM chronicle's stored reasoning once
 
 PROFILE = register(GameProfile(
     id="vtm",
@@ -134,9 +136,14 @@ PROFILE = register(GameProfile(
     sheet_doc=SHEET_DOC,
     trait_doc=(
         "e.g. 'blood', 'willpower', 'humanity', 'health.lethal', 'health.aggravated', 'experience.unspent', "
-        "'abilities.skills.stealth', 'disciplines.auspex'. Blood and willpower never exceed blood_max and willpower_max."
+        "'abilities.skills.stealth', 'disciplines.auspex'."
     ),
-    dice_doc="Roll a V20 dice pool. Use for every roll in the game, including NPC rolls.",
+    cap_doc=", and blood and willpower never exceed blood_max and willpower_max.",
+    dice_doc=(
+        "Roll a V20 dice pool. Use for every roll in the game, including NPC rolls. "
+        "Set hidden=true for rolls whose dice the player must not see (NPC Obfuscate, "
+        "secret Perception checks, etc.). Describe the pool to the player before rolling."
+    ),
     list_doc="e.g. 'VTM/npc', 'VTM/malkavian', 'VTM/plot'",
     state_keys=("name", "clan", "generation", "blood", "blood_max", "willpower", "willpower_max", "humanity", "path", "health"),
     caps={"blood": "blood_max", "willpower": "willpower_max"},
