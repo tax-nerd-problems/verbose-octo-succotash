@@ -51,6 +51,19 @@ MIGRATIONS = {
 THINKING_TYPES = {"thinking", "redacted_thinking"}
 
 
+def _player_text(m: dict) -> str | None:
+    """The text of a user message typed by the player (or the app's opening line); None for
+    tool results, summaries and anything else."""
+    if m.get("role") != "user":
+        return None
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    if c and all(isinstance(b, dict) and b.get("type") == "text" for b in c):
+        return "\n".join(b.get("text", "") for b in c)
+    return None
+
+
 class DB:
     def __init__(self, path: Path | str | None = None):
         self.path = str(path or config.DB_PATH)
@@ -244,13 +257,41 @@ class DB:
         with self._conn() as c:
             return c.execute("SELECT 1 FROM messages WHERE chronicle_id = ? LIMIT 1", (cid,)).fetchone() is not None
 
-    def pop_last_messages(self, cid: str, n: int) -> None:
-        """Remove the last n history entries (used to unwind a turn that never got a response)."""
+    def last_message_seq(self, cid: str) -> int:
+        """Sequence number of the last history entry (0 when the history is empty)."""
         with self._conn() as c:
-            c.execute(
-                "DELETE FROM messages WHERE chronicle_id = ? AND seq > (SELECT COALESCE(MAX(seq), 0) - ? FROM messages WHERE chronicle_id = ?)",
-                (cid, n, cid),
-            )
+            return c.execute("SELECT COALESCE(MAX(seq), 0) FROM messages WHERE chronicle_id = ?", (cid,)).fetchone()[0]
+
+    def truncate_messages(self, cid: str, seq: int) -> None:
+        """Remove every history entry after seq (used to unwind a turn that never got a response)."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE chronicle_id = ? AND seq > ?", (cid, seq))
+
+    def drop_unanswered_turns(self, cid: str) -> list[str]:
+        """Remove turns that never got an answer. Returns the text of each removed player message.
+
+        A turn writes the player's message and then the Storyteller-screen system message
+        before the request goes out. If the connection dropped and the app did not take
+        them back (releases before the fix did not, when the drop happened mid-stream),
+        the history ends in a system message, and the next turn puts a user message
+        after it. The API rejects that shape outright ("role 'system' must precede an
+        'assistant' message"), so no turn can get through until the pair is removed.
+        """
+        messages = self.get_messages(cid)
+        kept: list[dict] = []
+        dropped: list[str] = []
+        for i, m in enumerate(messages):
+            nxt = messages[i + 1] if i + 1 < len(messages) else None
+            if m["role"] == "system" and m["content"] and (nxt is None or nxt["role"] != "assistant"):
+                text = _player_text(kept[-1]) if kept else None
+                if text is not None:
+                    kept.pop()
+                dropped.append(text or "")
+                continue
+            kept.append(m)
+        if dropped:
+            self.replace_messages(cid, kept)
+        return dropped
 
     # ---------- UI transcript ----------
     def append_event(self, cid: str, kind: str, payload: dict) -> dict:
