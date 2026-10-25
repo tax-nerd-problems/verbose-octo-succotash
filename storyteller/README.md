@@ -1,6 +1,6 @@
 # AI Storyteller
 
-A local web app that runs this vault's Vampire: The Masquerade chronicle with Claude as the Storyteller. The vault is the Storyteller's library and memory: rules digest, setting, campaign overview, NPC sheets, and sourcebooks are read from the notes around this folder, and session logs are written back into the vault.
+A local web app that runs a Storyteller-System chronicle with Claude as the Storyteller. It ships with two games: **Vampire: The Masquerade (V20)**, played from this vault, and **Mage: The Ascension (M20)**, played from a second vault that sits next to this one. A vault is the Storyteller's library and memory: rules digest, setting, campaign notes, NPC sheets, and sourcebooks are read from its notes, and session logs are written back into it.
 
 ## Setup
 
@@ -21,6 +21,14 @@ Open http://localhost:8000, click **New chronicle**, and the Storyteller opens w
 - **What you're carrying.** The side panel lists what's on you right now, and the sheet's **Possessions** tab shows everything: in hand, worn, pockets, bag, and what's stashed at your haven, in a car, or elsewhere. The Storyteller records every change as the story makes it. Click any gold line in the transcript to jump to the right tab.
 - **Reading at your own pace.** When you send a move, your message moves to the top of the screen and the reply appears beneath it. The page never scrolls by itself while the Storyteller writes. If the reply runs past the bottom, a **New text below** button appears; scroll whenever you like.
 - **Memory meter.** Click **Memory** at the bottom of the side panel to see how much of the chronicle the model is holding in its head right now (its context), when it will next be condensed, what the last turn cost in tokens and how much of it came from cache, and a running cost estimate for the chronicle. It stays folded away unless you open it. The estimate uses the list prices in `config.py`; the Usage page in the Anthropic Console is the real bill.
+
+## Games and vaults
+
+Each game has its own vault, and the app finds vaults by a marker: an `AI Storyteller.md` note at the vault's root whose frontmatter says `game: vtm` or `game: mage`. This vault is the home vault. Any folder **next to it** (same parent folder) that carries the marker is picked up automatically; folders elsewhere can be listed in `ST_EXTRA_VAULTS` (several paths separated by `:` on Mac/Linux or `;` on Windows; `mage=/path` pins the game). One vault per game. The **New chronicle** dialog offers every game that has a vault, each with its own campaigns; a game without a vault is shown greyed out.
+
+What a game profile changes (`storyteller/games/<game>/`): the Storyteller's persona and rules prompt, the campaign premises, the summarizer instructions, which vault notes go into the always-loaded prompt, the sheet layout (identity fields, ability lists, trait groups, pools and trackers), the per-turn screen summary, trait caps, and any game-specific tools. Mage adds `roll_magick`, which works out the M20 difficulty, rolls Arete, and applies Quintessence spent and Paradox gained to the sheet. Everything else (the turn loop, dice, possessions, the vault tools, memory condensing, the meter, the UI) is shared.
+
+To get the Mage vault, see its own README: it is a separate folder cloned from the `mage-vault` branch of this repository.
 
 ## Several chronicles
 
@@ -58,7 +66,8 @@ Environment variables, all optional:
 | `ST_MODEL` | `claude-opus-5-5` | Model id |
 | `ST_EFFORT` | `medium` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `ST_MAX_TOKENS` | `8000` | Max output tokens per response |
-| `ST_CAMPAIGN` | `campaign1` | Default campaign (see `config.py`) |
+| `ST_GAME` | the home vault's game | Default game in the New chronicle dialog |
+| `ST_EXTRA_VAULTS` | (empty) | Extra vault folders, see Games and vaults |
 | `ST_CACHE_TTL` | `1h` | Cache lifetime: `1h`, or `5m` if your turns always come less than five minutes apart |
 | `ST_COMPACTION` | `1` | Set `0` to never condense (the context then grows until the model's 1M-token limit) |
 | `ST_COMPACT_AT` | `150000` | Condense when the context reaches this many tokens |
@@ -69,7 +78,7 @@ Environment variables, all optional:
 | `VAULT_DIR` | parent folder | Vault root |
 | `ST_DB_PATH` | `storyteller/chronicles.db` | SQLite file |
 
-To add a campaign, add an entry to `CAMPAIGNS` in `config.py` with the core files to cache and a premise file in `prompts/`.
+To add a campaign, add an entry to the game's `campaigns` in `storyteller/games/<game>/__init__.py` with the vault notes to cache and a premise file in that game's `prompts/` folder.
 
 ## Tests
 

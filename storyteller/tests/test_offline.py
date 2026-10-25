@@ -13,9 +13,10 @@ from types import SimpleNamespace
 
 VAULT = Path(__file__).resolve().parents[2]
 
-from storyteller import config  # noqa: E402
+from storyteller import config, games  # noqa: E402
 from storyteller.db import DB  # noqa: E402
 from storyteller.storyteller import Storyteller, build_system  # noqa: E402
+from storyteller import tools  # noqa: E402
 from storyteller.tools import TOOL_SPECS  # noqa: E402
 from storyteller.vault import Vault  # noqa: E402
 
@@ -95,7 +96,7 @@ class VaultTests(unittest.TestCase):
 
 class SystemPromptTests(unittest.TestCase):
     def test_build_system(self):
-        blocks = build_system("campaign1", VAULT)
+        blocks = build_system(games.get("vtm"), "campaign1", VAULT)
         self.assertEqual(blocks[-1]["cache_control"], {"type": "ephemeral", "ttl": "1h"})
         text = "\n".join(b["text"] for b in blocks)
         self.assertIn("Core Mechanics", text)
@@ -295,9 +296,15 @@ class SheetViewTests(unittest.TestCase):
         self.assertEqual(skills["Animal Ken"]["rating"], 1)
         self.assertEqual(skills["Dancing"]["rating"], 2)  # secondary ability stays in its group
         self.assertEqual(len(v["abilities"][0]["traits"]), 10)
-        self.assertEqual([t["name"] for t in v["virtues"]], ["Conscience", "Self-Control", "Courage"])
-        self.assertEqual(v["blood"], {"current": 9, "max": 12, "per_turn": 1})
-        self.assertEqual(v["willpower"], {"current": 3, "max": 4})
+        groups = {g["title"]: g for g in v["groups"]}
+        self.assertEqual([t["name"] for t in groups["Virtues"]["traits"]], ["Conscience", "Self-Control", "Courage"])
+        self.assertEqual([(t["name"], t["rating"]) for t in groups["Disciplines"]["traits"]], [("Auspex", 1), ("Celerity", 1), ("Presence", 2)])
+        pools = {p["label"]: p for p in v["status"]["pools"]}
+        self.assertEqual((pools["Blood pool"]["current"], pools["Blood pool"]["max"], pools["Blood pool"]["note"]), (9, 12, "Spend up to 1 per turn"))
+        self.assertEqual((pools["Willpower"]["current"], pools["Willpower"]["max"]), (3, 4))
+        self.assertEqual(v["status"]["track"], {"label": "Humanity", "rating": 7, "max": 10})
+        self.assertEqual([t["label"] for t in v["panel"]], ["Blood pool", "Willpower", "Humanity", "Health"])
+        self.assertEqual(v["status"]["texts"], [{"label": "Weakness", "text": "Rapture"}])
         self.assertEqual([b["mark"] for b in v["health"]["boxes"]], ["*", "X", "X", "/", "", "", ""])
         self.assertEqual((v["health"]["status"], v["health"]["penalty"]), ("Wounded", -2))
         self.assertEqual([m["kind"] for m in v["merits_flaws"]], ["merit", "flaw"])
@@ -321,14 +328,15 @@ class SheetViewTests(unittest.TestCase):
         self.assertEqual(v["attributes"][1]["traits"][0]["rating"], 3)
         skills = {t["name"]: t for t in v["abilities"][1]["traits"]}
         self.assertEqual((skills["Stealth"]["rating"], skills["Stealth"]["specialty"]), (3, "Shadows"))
-        self.assertEqual(v["morality"], {"label": "Path of Night", "rating": 5})
-        self.assertEqual(v["willpower"], {"current": 2, "max": 5})
+        self.assertEqual(v["status"]["track"], {"label": "Path of Night", "rating": 5, "max": 10})
+        wp = next(p for p in v["status"]["pools"] if p["label"] == "Willpower")
+        self.assertEqual((wp["current"], wp["max"]), (2, 5))
         self.assertEqual(v["health"]["status"], "Injured")
         self.assertEqual(sum(1 for b in v["health"]["boxes"] if b["mark"]), 3)
         self.assertEqual(v["merits_flaws"][1], {"name": "Nightmares", "points": 1, "kind": "flaw", "note": None})
         self.assertEqual(v["experience"]["unspent"], 4)
         self.assertIn("Equipment", [x["label"] for x in v["extras"]])
-        self.assertIsNone(v["blood"])
+        self.assertNotIn("Blood pool", [p["label"] for p in v["status"]["pools"]])
 
     def test_empty_and_inventory(self):
         v = sheet_view({}, {"seq": 3, "items": [
@@ -524,7 +532,7 @@ class UpgradeTests(unittest.TestCase):
         db.append_message(ch["id"], "system", "screen")
         db.append_message(ch["id"], "assistant", [{"type": "thinking", "thinking": "", "signature": "x"}, {"type": "text", "text": "Hello."}])
         st = Storyteller(db, self.vault, None)
-        db.set_prefix_hash(ch["id"], stmod.prefix_hash(st.system_for("campaign1"), stmod.TOOL_SPECS))
+        db.set_prefix_hash(ch["id"], stmod.prefix_hash(st.system_for(games.get("vtm"), "campaign1"), TOOL_SPECS))
 
         class Rejecting(FakeClient):
             def _stream(self, **kw):
@@ -832,6 +840,160 @@ class ServerLockTests(unittest.TestCase):
             self.assertEqual(db.get_events(a["id"]), [])
             self.assertEqual(len(db.get_messages(b["id"])), 1)
             self.assertEqual([c["name"] for c in db.list_chronicles()], ["B"])
+        finally:
+            shutil.rmtree(tmp)
+
+
+# ---------- a second game: Mage ----------
+from storyteller.games import mage  # noqa: E402
+
+MAGE_SHEET = {
+    "name": "Ilse Varga", "concept": "Lapsed physicist", "faction": "Society of Ether", "essence": "Dynamic",
+    "paradigm": "Everything is energy; the right apparatus reveals it.", "practice": "Weird Science",
+    "instruments": ["brass goggles", "oscillator", "formulae", "lab coat", "tuning fork", "coffee", "notebook"],
+    "attributes": {"physical": {"strength": 2, "dexterity": 2, "stamina": 2}, "social": {"charisma": 2, "manipulation": 3, "appearance": 2},
+                   "mental": {"perception": 3, "intelligence": 4, "wits": 3}},
+    "abilities": {"talents": {"alertness": 2, "awareness": 2}, "skills": {"technology": 3, "research": 3}, "knowledges": {"science": 4, "enigmas": 2}},
+    "spheres": {"forces": 2, "prime": 1, "matter": 1, "affinity": "forces"},
+    "arete": 2, "willpower": 5, "willpower_max": 6, "quintessence": 4, "paradox": 2,
+    "backgrounds": {"avatar": 3, "library": 2}, "resonance": {"dynamic": 1},
+    "merits_flaws": [{"name": "Sphere Natural (Forces)", "points": 5, "type": "merit"}],
+    "health": {"bashing": 0, "lethal": 0, "aggravated": 0}, "experience": {"unspent": 3, "total": 3},
+}
+
+
+class MageProfileTests(unittest.TestCase):
+    def test_registry_and_tools(self):
+        self.assertEqual(sorted(games.all_games()), ["mage", "vtm"])
+        specs = {t["name"] for t in tools.tool_specs(games.get("mage"))}
+        self.assertIn("roll_magick", specs)
+        self.assertNotIn("roll_magick", {t["name"] for t in tools.tool_specs(games.get("vtm"))})
+        self.assertIn("M20", next(t for t in tools.tool_specs(games.get("mage")) if t["name"] == "roll_dice")["description"])
+        self.assertIn('"spheres"', next(t for t in tools.tool_specs(games.get("mage")) if t["name"] == "set_sheet")["description"])
+
+    def test_sheet_view(self):
+        v = sheet_view(MAGE_SHEET, None, games.get("mage"))
+        self.assertEqual(v["game"], "mage")
+        self.assertEqual(v["subtitle"], "Society of Ether · Dynamic · Lapsed physicist")
+        groups = {g["title"]: g for g in v["groups"]}
+        spheres = groups["Spheres"]["traits"]
+        self.assertEqual([t["name"] for t in spheres], list(mage.SPHERES))
+        self.assertEqual({t["name"]: t["rating"] for t in spheres}["Forces"], 2)
+        self.assertTrue(next(t for t in spheres if t["name"] == "Forces")["mark"])
+        self.assertFalse(next(t for t in spheres if t["name"] == "Prime")["mark"])
+        self.assertEqual(v["status"]["track"], {"label": "Arete", "rating": 2, "max": 10})
+        self.assertEqual(v["status"]["wheel"]["left"]["current"], 4)
+        self.assertEqual(v["status"]["wheel"]["right"]["current"], 2)
+        self.assertEqual(v["status"]["wheel"]["size"], 20)
+        self.assertEqual([t["label"] for t in v["panel"]], ["Arete", "Willpower", "Quintessence", "Paradox", "Health"])
+        self.assertEqual([t["label"] for t in v["status"]["texts"]], ["Instruments"])
+        skills = {t["name"]: t["rating"] for t in v["abilities"][1]["traits"]}
+        self.assertEqual(skills["Technology"], 3)
+        self.assertIn("Martial Arts", skills)
+        self.assertNotIn("Animal Ken", skills)
+        self.assertEqual(v["extras"], [])
+
+    def test_magick_difficulty(self):
+        self.assertEqual(mage.magick_difficulty(2, "coincidental"), (5, 0))
+        self.assertEqual(mage.magick_difficulty(3, "vulgar_witnessed"), (8, 0))
+        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed"), (9, 1))
+        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed", quintessence_spent=3), (7, 0))  # Quintessence lowers the raw difficulty
+        self.assertEqual(mage.magick_difficulty(5, "vulgar_witnessed", quintessence_spent=1), (9, 0))
+        self.assertEqual(mage.magick_difficulty(1, "coincidental", quintessence_spent=3), (3, 0))
+        self.assertEqual(mage.paradox_for("coincidental", "success", 3), 0)
+        self.assertEqual(mage.paradox_for("coincidental", "botch", 3), 1)
+        self.assertEqual(mage.paradox_for("vulgar_witnessed", "success", 3), 4)
+
+    def test_roll_magick_applies_quintessence_and_paradox(self):
+        import storyteller.dice as d
+
+        class FakeRng:
+            def __init__(self, seq):
+                self.seq = list(seq)
+
+            def randint(self, a, b):
+                return self.seq.pop(0)
+
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            db = DB(tmp / "m.db")
+            ch = db.create_chronicle("Ilse", "default", "mage")
+            db.set_sheet(ch["id"], dict(MAGE_SHEET))
+            events = []
+            ctx = ToolContext(db, None, ch["id"], lambda k, p: events.append((k, p)))
+            self.assertEqual(ctx.profile.id, "mage")
+            d._rng = FakeRng([8, 9])  # arete 2, vulgar witnessed with Forces 2 -> diff 7
+            out = json.loads(ctx.run("roll_magick", {"arete": 2, "highest_sphere": 2, "kind": "vulgar_witnessed",
+                                                     "successes_needed": 2, "label": "Lightning from the oscillator", "quintessence_spent": 1}))
+            self.assertEqual((out["difficulty"], out["needed"], out["outcome"]), (6, 2, "success"))
+            self.assertEqual(out["paradox_gained"], 3)
+            sheet = db.get_chronicle(ch["id"])["sheet"]
+            self.assertEqual((sheet["quintessence"], sheet["paradox"]), (3, 5))
+            dice_ev = next(p for k, p in events if k == "dice")
+            self.assertTrue(dice_ev["magick"])
+            self.assertEqual(dice_ev["paradox_gained"], 3)
+            d._rng = FakeRng([1, 2])
+            out = json.loads(ctx.run("roll_magick", {"arete": 2, "highest_sphere": 1, "kind": "coincidental", "successes_needed": 1, "label": "x"}))
+            self.assertEqual(out["outcome"], "botch")
+            self.assertEqual(db.get_chronicle(ch["id"])["sheet"]["paradox"], 6)
+            # the wheel cap: quintessence cannot exceed 20 - paradox
+            out = json.loads(ctx.run("update_trait", {"path": "quintessence", "delta": 30, "reason": "Drank a Node dry"}))
+            self.assertEqual((out["new"], out.get("clamped")), (14, True))
+            with self.assertRaises(ValueError):
+                ctx.run("roll_dice", {"pool": 3, "difficulty": 6, "label": "x", "kind": "coincidental"})
+        finally:
+            d._rng = __import__("random").SystemRandom()
+            shutil.rmtree(tmp)
+
+    def test_turn_uses_the_mage_vault_and_prompts(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            mv = tmp / "Mage Vault"
+            (mv / "Storyteller Reference").mkdir(parents=True)
+            (mv / "Storyteller Reference" / "Magick Rules.md").write_text("---\ntags: [MTA]\n---\n# Magick Rules\n\nParadox hurts.\n")
+            (mv / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# AI Storyteller\n")
+            db = DB(tmp / "t.db")
+            ch = db.create_chronicle("Ilse", "default", "mage")
+            client = FakeClient([msg(text("The lab hums."), tool("t1", "roll_magick", arete=1, highest_sphere=1, kind="coincidental", successes_needed=1, label="spark"), stop="tool_use"), msg(text("Done."))])
+            st = Storyteller(db, None, client, vaults={"vtm": Vault(VAULT), "mage": Vault(mv)})
+            events = list(st.turn(ch["id"], "I switch on the oscillator."))
+            self.assertEqual(events[-1]["kind"], "done")
+            self.assertEqual(events[-1]["game"], "mage")
+            kw = client.requests[0]
+            self.assertIn("roll_magick", [t["name"] for t in kw["tools"]])
+            system_text = "\n".join(b["text"] for b in kw["system"])
+            self.assertIn("Paradox hurts.", system_text)
+            self.assertNotIn("Eleazar", system_text)
+            self.assertTrue(any(e["kind"] == "dice" and e.get("magick") for e in events))
+            # a chronicle whose game has no vault is refused clearly
+            db2 = DB(tmp / "t2.db")
+            ch2 = db2.create_chronicle("Nobody", "default", "mage")
+            st2 = Storyteller(db2, Vault(VAULT), client)
+            self.assertEqual(list(st2.turn(ch2["id"], "hi"))[0]["kind"], "error")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_vault_discovery(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            home = tmp / "VTM Vault"; home.mkdir()
+            (home / "AI Storyteller.md").write_text("---\ngame: vtm\n---\n# x\n")
+            sib = tmp / "Mage Vault"; sib.mkdir()
+            (sib / "AI Storyteller.md").write_text("---\ngame: mage\ntags: [MTA]\n---\n# x\n")
+            (tmp / "Not a vault").mkdir()
+            extra = tmp / "elsewhere" / "Another"; extra.mkdir(parents=True)
+            (extra / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
+            old = (config.VAULT_DIR, config.EXTRA_VAULTS)
+            try:
+                config.VAULT_DIR, config.EXTRA_VAULTS = home, ""
+                found = config.discover_vaults()
+                self.assertEqual(found, {"vtm": home, "mage": sib.resolve()})
+                config.EXTRA_VAULTS = str(extra)
+                self.assertEqual(config.discover_vaults()["mage"], extra.resolve())  # explicit paths win over siblings
+                config.EXTRA_VAULTS = f"mage={extra}"
+                self.assertEqual(config.discover_vaults()["mage"], extra.resolve())
+            finally:
+                config.VAULT_DIR, config.EXTRA_VAULTS = old
         finally:
             shutil.rmtree(tmp)
 

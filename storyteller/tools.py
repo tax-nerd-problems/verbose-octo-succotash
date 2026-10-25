@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import dice
+from . import dice, games
 from .db import DB
+from .games import GameProfile
 from .sheet import LOCATION_KEYS, LOCATION_LABELS, _location
 from .vault import Vault
 
@@ -19,12 +20,29 @@ def _schema(props: dict, required: list[str]) -> dict:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
-TOOL_SPECS: list[dict] = [
+def tool_specs(profile: GameProfile) -> list[dict]:
+    """The tool list for one game: the shared tools with that game's wording, plus its own tools."""
+    specs = [json.loads(json.dumps(t)) for t in _BASE_SPECS]  # deep copy
+    for t in specs:
+        if t["name"] == "roll_dice":
+            t["description"] = profile.dice_doc + " " + t["description"]
+        elif t["name"] == "set_sheet":
+            t["description"] = t["description"].replace("{SHEET_DOC}", profile.sheet_doc)
+        elif t["name"] == "update_trait":
+            t["description"] = t["description"].replace("{TRAIT_DOC}", profile.trait_doc)
+        elif t["name"] == "list_notes":
+            t["description"] = t["description"].replace("{LIST_DOC}", profile.list_doc)
+    specs.extend(json.loads(json.dumps(t)) for t in profile.extra_tools)
+    for t in specs:
+        t["eager_input_streaming"] = True
+    return specs
+
+
+_BASE_SPECS: list[dict] = [
     {
         "name": "roll_dice",
         "description": (
-            "Roll a V20 dice pool. Use for every roll in the game, including NPC rolls. "
-            "Set hidden=true for rolls whose dice the player must not see (NPC Obfuscate, "
+            "Set hidden=true for rolls whose dice the player must not see (NPC powers, "
             "secret Perception checks, etc.). Describe the pool to the player before rolling."
         ),
         "input_schema": _schema(
@@ -50,22 +68,7 @@ TOOL_SPECS: list[dict] = [
             "Replace the player's character sheet. Call once character creation is agreed, or for a large "
             "revision. Keep every value you already track. Use this layout (lowercase keys, snake_case for "
             "multi-word trait names; include only abilities with dots; secondary abilities go in the matching group):\n"
-            '{"name": "...", "concept": "...", "clan": "...", "generation": 11, "sire": "...", "nature": "...", '
-            '"demeanor": "...", "sect": "Camarilla", "embraced": "1999", "apparent_age": "mid-20s", '
-            '"attributes": {"physical": {"strength": 2, "dexterity": 3, "stamina": 2}, '
-            '"social": {"charisma": 3, "manipulation": 2, "appearance": 4}, '
-            '"mental": {"perception": 3, "intelligence": 2, "wits": 3}}, '
-            '"abilities": {"talents": {"alertness": 1, "subterfuge": 3}, "skills": {"etiquette": 2, "animal_ken": 1}, '
-            '"knowledges": {"academics": 1}}, '
-            '"specialties": {"etiquette": "Elysium"}, '
-            '"disciplines": {"auspex": 2, "presence": 1}, '
-            '"backgrounds": {"resources": 2, "contacts": 1}, '
-            '"virtues": {"conscience": 3, "self_control": 3, "courage": 2}, '
-            '"merits_flaws": [{"name": "Eat Food", "points": 1, "type": "merit"}, {"name": "Haunted", "points": 3, "type": "flaw"}], '
-            '"humanity": 6, "willpower": 3, "willpower_max": 3, "blood": 10, "blood_max": 12, '
-            '"health": {"bashing": 0, "lethal": 0, "aggravated": 0}, '
-            '"experience": {"unspent": 0, "total": 0}, "weakness": "...", "rituals": [], "notes": "..."}\n'
-            "A character on a Path uses \"path\": {\"name\": \"...\", \"rating\": 5} instead of humanity. "
+            "{SHEET_DOC}\n"
             "Possessions are not part of the sheet: track them with set_inventory and update_inventory."
         ),
         "input_schema": _schema({"sheet": {"type": "object", "description": "The full character sheet."}}, ["sheet"]),
@@ -73,12 +76,9 @@ TOOL_SPECS: list[dict] = [
     {
         "name": "update_trait",
         "description": (
-            "Adjust one value on the player's sheet. Use dotted paths into the sheet layout, e.g. 'blood', "
-            "'willpower', 'humanity', 'health.lethal', 'health.aggravated', 'experience.unspent', "
-            "'abilities.skills.stealth', 'disciplines.auspex'. Give delta (numeric change) or value "
-            "(replacement, any JSON type). Numbers never go below 0, and blood and willpower never exceed "
-            "blood_max and willpower_max. Damage: add to health.bashing, health.lethal or health.aggravated "
-            "after soak; healing subtracts."
+            "Adjust one value on the player's sheet. Use dotted paths into the sheet layout, {TRAIT_DOC} "
+            "Give delta (numeric change) or value (replacement, any JSON type). Numbers never go below 0. "
+            "Damage: add to health.bashing, health.lethal or health.aggravated after soak; healing subtracts."
         ),
         "input_schema": _schema(
             {
@@ -200,7 +200,7 @@ TOOL_SPECS: list[dict] = [
     },
     {
         "name": "list_notes",
-        "description": "List notes by tag (e.g. 'VTM/npc', 'VTM/malkavian', 'VTM/plot') or by folder. Returns titles and one-line summaries.",
+        "description": "List notes by tag ({LIST_DOC}) or by folder. Returns titles and one-line summaries.",
         "input_schema": _schema({"tag": {"type": "string"}, "folder": {"type": "string"}}, []),
     },
     {
@@ -231,8 +231,8 @@ TOOL_SPECS: list[dict] = [
     },
 ]
 
-for _spec in TOOL_SPECS:
-    _spec["eager_input_streaming"] = True
+# The VTM list, for callers that do not pass a profile.
+TOOL_SPECS: list[dict] = tool_specs(games.get("vtm"))
 
 
 def _item_line(it: dict) -> str:
@@ -244,17 +244,21 @@ def _item_line(it: dict) -> str:
 class ToolContext:
     """Binds tool implementations to one chronicle. Emits UI events via `emit`."""
 
-    def __init__(self, db: DB, vault: Vault, chronicle_id: str, emit, chronicle_name: str | None = None):
+    def __init__(self, db: DB, vault: Vault, chronicle_id: str, emit, chronicle_name: str | None = None,
+                 profile: GameProfile | None = None):
         self.db = db
         self.vault = vault
         self.cid = chronicle_id
         self.emit = emit  # callable(kind: str, payload: dict)
-        if chronicle_name is None and db is not None:
-            chronicle_name = (db.get_chronicle(chronicle_id) or {}).get("name", "")
+        ch = (db.get_chronicle(chronicle_id) or {}) if db is not None else {}
+        if chronicle_name is None:
+            chronicle_name = ch.get("name", "")
         self.name = chronicle_name or ""  # vault reads and writes are scoped to this chronicle
+        self.profile = profile or games.get(ch.get("game") or "vtm")
+        self.specs = tool_specs(self.profile)
 
     def validate(self, name: str, args: Any) -> str | None:
-        spec = next((s for s in TOOL_SPECS if s["name"] == name), None)
+        spec = next((s for s in self.specs if s["name"] == name), None)
         if spec is None:
             return f"unknown tool {name!r}"
         if not isinstance(args, dict):
@@ -283,6 +287,9 @@ class ToolContext:
         err = self.validate(name, args)
         if err:
             raise ValueError(err)
+        impl = self.profile.extra_impls.get(name)
+        if impl is not None:
+            return impl(self, **args)
         fn = getattr(self, f"t_{name}")
         return fn(**args)
 
@@ -344,9 +351,16 @@ class ToolContext:
             new = int(new) if float(new).is_integer() else new
             if new < 0:
                 new, clamped = 0, True
-            caps = {"blood": "blood_max", "willpower": "willpower_max"}
-            if len(parts) == 1 and leaf in caps and isinstance(sheet.get(caps[leaf]), (int, float)) and new > sheet[caps[leaf]]:
-                new, clamped = sheet[caps[leaf]], True
+            cap = self.profile.caps.get(leaf) if len(parts) == 1 else None
+            if isinstance(cap, str):
+                limit = sheet.get(cap)
+            elif isinstance(cap, tuple) and cap[0] == "wheel":
+                other = sheet.get(cap[2])
+                limit = cap[1] - (other if isinstance(other, (int, float)) else 0)
+            else:
+                limit = None
+            if isinstance(limit, (int, float)) and new > limit:
+                new, clamped = limit, True
         elif value is not None:
             new = value
         else:

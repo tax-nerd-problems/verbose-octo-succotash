@@ -45,6 +45,7 @@ MIGRATIONS = {
     "prefix_hash": "ALTER TABLE chronicles ADD COLUMN prefix_hash TEXT NOT NULL DEFAULT ''",
     "usage": "ALTER TABLE chronicles ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'",
     "recap_due": "ALTER TABLE chronicles ADD COLUMN recap_due INTEGER NOT NULL DEFAULT 0",
+    "game": "ALTER TABLE chronicles ADD COLUMN game TEXT NOT NULL DEFAULT 'vtm'",
 }
 
 THINKING_TYPES = {"thinking", "redacted_thinking"}
@@ -72,12 +73,12 @@ class DB:
             c.close()
 
     # ---------- chronicles ----------
-    def create_chronicle(self, name: str, campaign: str) -> dict:
+    def create_chronicle(self, name: str, campaign: str, game: str = "vtm") -> dict:
         cid = uuid.uuid4().hex[:12]
         with self._conn() as c:
             c.execute(
-                "INSERT INTO chronicles (id, name, campaign, created) VALUES (?, ?, ?, ?)",
-                (cid, name, campaign, datetime.now().isoformat(timespec="seconds")),
+                "INSERT INTO chronicles (id, name, campaign, created, game) VALUES (?, ?, ?, ?, ?)",
+                (cid, name, campaign, datetime.now().isoformat(timespec="seconds"), game),
             )
         return self.get_chronicle(cid)
 
@@ -90,7 +91,7 @@ class DB:
 
     def list_chronicles(self) -> list[dict]:
         with self._conn() as c:
-            rows = c.execute("SELECT id, name, campaign, created FROM chronicles ORDER BY created DESC").fetchall()
+            rows = c.execute("SELECT id, name, campaign, created, game FROM chronicles ORDER BY created DESC").fetchall()
         return [dict(r) for r in rows]
 
     def get_chronicle(self, cid: str) -> dict | None:
@@ -260,7 +261,7 @@ class DB:
                 "INSERT INTO events (chronicle_id, seq, ts, kind, payload) VALUES (?, ?, ?, ?, ?)",
                 (cid, seq, ts, kind, json.dumps(payload, ensure_ascii=False)),
             )
-        return {"seq": seq, "ts": ts, "kind": kind, **payload}
+        return {**payload, "seq": seq, "ts": ts, "kind": kind}  # the event's own fields win over payload keys
 
     def delete_event(self, cid: str, seq: int) -> None:
         with self._conn() as c:
@@ -271,4 +272,4 @@ class DB:
             rows = c.execute(
                 "SELECT seq, ts, kind, payload FROM events WHERE chronicle_id = ? ORDER BY seq", (cid,)
             ).fetchall()
-        return [{"seq": r["seq"], "ts": r["ts"], "kind": r["kind"], **json.loads(r["payload"])} for r in rows]
+        return [{**json.loads(r["payload"]), "seq": r["seq"], "ts": r["ts"], "kind": r["kind"]} for r in rows]

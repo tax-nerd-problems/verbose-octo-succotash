@@ -1,37 +1,28 @@
 """Turn the stored character sheet and possessions into a display model for the UI.
 
-The Storyteller is asked to save sheets in the standard layout described in the
-set_sheet tool, but older chronicles and the odd improvisation produce other
-shapes. This module is deliberately tolerant: it maps what it recognises onto
-the V20 sheet and passes everything else through under "extras", so nothing the
-Storyteller recorded is hidden from the player.
+The Storyteller is asked to save sheets in the layout the game's set_sheet tool
+describes, but older chronicles and the odd improvisation produce other shapes.
+This module is deliberately tolerant: it maps what it recognises onto the game's
+sheet layout (a GameProfile.sheet) and passes everything else through under
+"extras", so nothing the Storyteller recorded is hidden from the player.
 """
 from __future__ import annotations
 
 import re
 from typing import Any
 
+from .games import GameProfile, SheetLayout
+
 ATTRIBUTES = [
     ("Physical", ["Strength", "Dexterity", "Stamina"]),
     ("Social", ["Charisma", "Manipulation", "Appearance"]),
     ("Mental", ["Perception", "Intelligence", "Wits"]),
 ]
-ABILITIES = [
-    ("Talents", ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Streetwise", "Subterfuge"]),
-    ("Skills", ["Animal Ken", "Crafts", "Drive", "Etiquette", "Firearms", "Larceny", "Melee", "Performance", "Stealth", "Survival"]),
-    ("Knowledges", ["Academics", "Computer", "Finance", "Investigation", "Law", "Medicine", "Occult", "Politics", "Science", "Technology"]),
-]
-VIRTUE_ORDER = ["Conscience", "Conviction", "Self-Control", "Instinct", "Courage"]
 HEALTH_LEVELS = [
     ("Bruised", 0), ("Hurt", -1), ("Injured", -1), ("Wounded", -2),
     ("Mauled", -2), ("Crippled", -5), ("Incapacitated", None),
 ]
 # generation: (max trait rating, max blood pool, blood per turn) — V20 generation chart
-GENERATION_TABLE = {
-    4: (9, 50, 10), 5: (8, 40, 8), 6: (7, 30, 6), 7: (6, 20, 4), 8: (5, 15, 3),
-    9: (5, 14, 2), 10: (5, 13, 1), 11: (5, 12, 1), 12: (5, 11, 1), 13: (5, 10, 1),
-    14: (5, 10, 1), 15: (5, 10, 1),
-}
 LOCATIONS = [
     ("held", "In hand"), ("worn", "Worn"), ("pockets", "Pockets"), ("bag", "Bag"),
     ("haven", "Haven"), ("vehicle", "Vehicle"), ("elsewhere", "Elsewhere"),
@@ -39,13 +30,6 @@ LOCATIONS = [
 LOCATION_KEYS = [k for k, _ in LOCATIONS]
 LOCATION_LABELS = dict(LOCATIONS)
 CARRIED = ("held", "worn", "pockets", "bag")
-IDENTITY = [
-    ("concept", "Concept", ()), ("clan", "Clan", ()), ("generation", "Generation", ()),
-    ("sire", "Sire", ()), ("nature", "Nature", ()), ("demeanor", "Demeanor", ("demeanour",)),
-    ("sect", "Sect", ()), ("embraced", "Embraced", ("embrace", "embrace_date", "embrace_year")),
-    ("apparent_age", "Apparent age", ("age",)), ("haven", "Haven", ()),
-    ("player", "Player", ()), ("chronicle", "Chronicle", ()),
-]
 RATING_KEYS = ("rating", "dots", "value", "level", "score", "permanent", "current", "points")
 NOTE_KEYS = ("specialty", "specialties", "speciality", "note", "notes", "powers", "description", "desc", "detail", "details")
 NAME_KEYS = ("name", "trait", "title", "label")
@@ -302,11 +286,41 @@ def inventory_view(inventory: dict | list | None) -> dict:
     }
 
 
-def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict:
+
+# Public names the game profiles use.
+as_int = _as_int
+field_of = _field
+rating_of = _rating
+text_of = text
+generation_of = _generation
+
+
+def _trait_rows(entries: list[dict], max_dots: int, specialties: dict, fixed: tuple[str, ...] = (), mark: str | None = None) -> list[dict]:
+    """Rows for a dotted-trait group: fixed names first (zero if absent), then the rest."""
+    by_key = {}
+    for e in entries:
+        by_key.setdefault(norm(e["name"]), e)
+    rows = []
+    for name in fixed:
+        e = by_key.pop(norm(name), {})
+        rows.append({"name": name, "rating": e.get("rating") or 0, "note": specialties.get(norm(name)) or e.get("note"),
+                     "mark": norm(name) == norm(mark) if mark else False})
+    for key, e in by_key.items():
+        nm = _title(e["name"]) if e["name"].islower() else e["name"]
+        rows.append({"name": nm, "rating": e.get("rating"), "note": specialties.get(key) or e.get("note"),
+                     "mark": key == norm(mark) if mark else False})
+    return rows
+
+
+def sheet_view(sheet: dict | None, inventory: dict | list | None = None, profile: GameProfile | None = None) -> dict:
+    if profile is None:
+        from .games import get
+        profile = get("vtm")
+    layout: SheetLayout = profile.sheet
     sheet = sheet if isinstance(sheet, dict) else {}
     inv = inventory_view(inventory)
     if not sheet:
-        return {"empty": True, "inventory": inv}
+        return {"empty": True, "inventory": inv, "game": profile.id}
     used: set[str] = set()
 
     def take(*names):
@@ -318,16 +332,14 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
     name = take("name", "character", "character_name") or "Unnamed"
     identity = []
     ident_vals = {}
-    for key, label, aliases in IDENTITY:
+    for key, label, aliases in layout.identity:
         v = take(key, *aliases)
         if v not in (None, "", []):
             ident_vals[key] = v
             if key == "generation" and _generation(v):
                 v = _ordinal(_generation(v))
             identity.append({"label": label, "value": text(v)})
-
-    gen = _generation(ident_vals.get("generation"))
-    max_trait, gen_blood_max, per_turn = GENERATION_TABLE.get(gen, (5, None, None)) if gen else (5, None, None)
+    max_trait = layout.max_dots(sheet) if layout.max_dots else 5
 
     # specialties, from a dedicated map or from trait notes
     specialties: dict[str, str] = {}
@@ -364,14 +376,14 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
     ab_raw = take("abilities", "ability")
     if ab_raw is not None:
         ab_entries.extend(collect(ab_raw))
-    for group, _ in ABILITIES:
+    for group, _ in layout.abilities:
         v = take(group)
         if v is not None:
             ab_entries.extend(collect(v, group))
     sec = take("secondary_abilities", "other_abilities")
     if sec is not None:
         ab_entries.extend(collect(sec, "Other"))
-    canon = {norm(n): (g, n) for g, names in ABILITIES for n in names}
+    canon = {norm(n): (g, n) for g, names in layout.abilities for n in names}
     found: dict[str, dict] = {}
     extra: dict[str, list] = {}
     for e in ab_entries:
@@ -380,10 +392,10 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
             found.setdefault(key, e)
         else:
             cat = norm(e.get("category") or "")
-            group = next((g for g, _ in ABILITIES if norm(g) == cat or norm(g).rstrip("s") == cat), "Other")
+            group = next((g for g, _ in layout.abilities if norm(g) == cat or norm(g).rstrip("s") == cat), "Other")
             extra.setdefault(group, []).append(e)
     abilities = []
-    for group, names in ABILITIES:
+    for group, names in layout.abilities:
         traits = []
         for n in names:
             e = found.get(norm(n), {})
@@ -396,22 +408,25 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
             {"name": _title(e["name"]) if e["name"].islower() else e["name"], "rating": e.get("rating") or 0, "specialty": specialties.get(norm(e["name"])) or e.get("note")} for e in extra["Other"]
         ]})
 
-    def trait_list(*names, category=None):
-        v = take(*names)
-        if v is None:
-            return []
-        return [{"name": _title(e["name"]) if e["name"].islower() else e["name"], "rating": e.get("rating"), "note": e.get("note")} for e in collect(v, category)]
-
-    disciplines = trait_list("disciplines", "discipline")
-    paths = trait_list("paths", "thaumaturgy_paths", "thaumaturgy")
-    rituals = trait_list("rituals")
-    backgrounds = trait_list("backgrounds", "background")
-    virtues = trait_list("virtues", "virtue")
-    order = {norm(v): i for i, v in enumerate(VIRTUE_ORDER)}
-    for e in virtues:
-        if norm(e["name"]) in order:
-            e["name"] = VIRTUE_ORDER[order[norm(e["name"])]]
-    virtues.sort(key=lambda e: order.get(norm(e["name"]), 99))
+    # dotted trait groups (Disciplines, Spheres, Backgrounds, Virtues, Resonance...)
+    groups = []
+    for g in layout.groups:
+        raw = take(g.key, *g.aliases)
+        mark = None
+        entries = []
+        if raw is not None:
+            if isinstance(raw, dict) and g.note_key and g.note_key in raw:
+                mark = str(raw[g.note_key])
+                raw = {k: v for k, v in raw.items() if k != g.note_key}
+            entries = collect(raw)
+        if raw is None and not g.fixed:
+            groups.append({"title": g.title, "traits": [], "max": g.max_dots})
+            continue
+        rows = _trait_rows(entries, g.max_dots, specialties, g.fixed, mark)
+        if g.fixed and g.title == "Virtues":
+            order = {norm(v): i for i, v in enumerate(g.fixed)}
+            rows.sort(key=lambda e: order.get(norm(e["name"]), 99))
+        groups.append({"title": g.title, "traits": rows, "max": g.max_dots, "mark_label": g.note_key})
 
     # merits & flaws
     mf_entries = []
@@ -421,50 +436,48 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
             mf_entries.extend(collect(v, cat))
     merits_flaws = [_merit_entry(e) for e in mf_entries]
 
-    # morality
-    morality = None
-    path_v = take("path_of_enlightenment", "road", "morality")
-    hum_v = take("humanity")
-    if path_v is not None and not isinstance(path_v, (int, float)):
-        pname, _ = _field(path_v, "name") if isinstance(path_v, dict) else (str(path_v), None)
-        morality = {"label": text(pname) or "Path", "rating": _rating(path_v)}
-    elif path_v is not None:
-        morality = {"label": "Path", "rating": _rating(path_v)}
-    if morality is None and hum_v is not None:
-        morality = {"label": "Humanity", "rating": _rating(hum_v)}
-    if morality is None:
-        p = sheet.get("path")
-        if isinstance(p, dict) or isinstance(p, (int, float)):
-            used.add("path")
-            pname = _field(p, "name")[0] if isinstance(p, dict) else None
-            morality = {"label": text(pname) or "Path", "rating": _rating(p)}
+    # status: the 1-10 track (Humanity/Path or Arete), pools, the wheel, prose
+    track = None
+    if profile.morality:
+        track = profile.morality(sheet, take)
+    elif layout.track_label:
+        v = take(*layout.track_keys)
+        if v is not None:
+            track = {"label": layout.track_label, "rating": _rating(v)}
+    if track:
+        track["max"] = 10
 
-    # willpower
-    wp_v = take("willpower")
-    wp_max_v = take("willpower_max", "willpower_permanent", "max_willpower", "permanent_willpower")
-    willpower = None
-    if isinstance(wp_v, dict):
-        cur = _as_int(_field(wp_v, "temporary", "current", "pool")[0])
-        mx = _as_int(_field(wp_v, "permanent", "max", "rating")[0])
-        willpower = {"current": cur if cur is not None else mx, "max": mx if mx is not None else cur}
-    elif wp_v is not None or wp_max_v is not None:
-        cur = _as_int(wp_v)
-        mx = _as_int(wp_max_v)
-        willpower = {"current": cur if cur is not None else mx, "max": mx if mx is not None else cur}
+    pools = []
+    for pool in layout.pools:
+        v = take(pool.key)
+        mx_v = take(pool.max_key) if pool.max_key else None
+        if isinstance(v, dict):
+            cur = _as_int(_field(v, "temporary", "current", "pool", "points")[0])
+            mx = _as_int(_field(v, "permanent", "max", "maximum", "rating")[0])
+        elif v is None and mx_v is None:
+            continue
+        else:
+            cur, mx = _as_int(v), _as_int(mx_v)
+        if mx is None and pool.max_default:
+            mx = pool.max_default(sheet)
+        if cur is None:
+            cur = mx
+        pools.append({"key": pool.key, "label": pool.label, "current": cur, "max": mx if mx is not None else cur, "style": pool.style,
+                      "note": pool.note(sheet) if pool.note else None})
 
-    # blood
-    bl_v = take("blood", "blood_pool", "bloodpool", "vitae")
-    bl_max_v = take("blood_max", "blood_pool_max", "max_blood", "max_blood_pool")
-    blood = None
-    if isinstance(bl_v, dict):
-        cur = _as_int(_field(bl_v, "current", "pool", "points")[0])
-        mx = _as_int(_field(bl_v, "max", "maximum")[0])
-        blood = {"current": cur, "max": mx or gen_blood_max}
-    elif bl_v is not None or bl_max_v is not None:
-        blood = {"current": _as_int(bl_v), "max": _as_int(bl_max_v) or gen_blood_max}
-    pt = _as_int(take("blood_per_turn", "blood_per_round"))
-    if blood is not None:
-        blood["per_turn"] = pt or per_turn
+    wheel = None
+    if layout.wheel:
+        lk, rk, size = layout.wheel
+        lv, rv = take(lk), take(rk)
+        if lv is not None or rv is not None:
+            wheel = {"size": size, "left": {"key": lk, "label": _title(lk), "current": _as_int(lv) or 0},
+                     "right": {"key": rk, "label": _title(rk), "current": _as_int(rv) or 0}}
+
+    texts = []
+    for key, label, aliases in layout.texts:
+        v = take(key, *aliases)
+        if v not in (None, "", []):
+            texts.append({"label": label, "text": text(v)})
 
     health = _health(take("health", "health_levels", "damage", "wounds"))
 
@@ -476,37 +489,50 @@ def sheet_view(sheet: dict | None, inventory: dict | list | None = None) -> dict
     elif exp_v is not None:
         experience = {"unspent": _as_int(exp_v), "total": exp_total, "text": None if _as_int(exp_v) is not None else text(exp_v)}
 
-    weakness = take("weakness", "clan_weakness", "clan_flaw")
-
     extras = []
     for k, v in sheet.items():
         if k in used or v in (None, "", [], {}):
             continue
         extras.append({"label": _title(k), "value": v})
 
-    subtitle_bits = [text(ident_vals.get("clan")) if ident_vals.get("clan") else None,
-                     f"{_ordinal(gen)} generation" if gen else None,
-                     text(ident_vals.get("concept")) if ident_vals.get("concept") else None]
+    # the side panel's compact trackers, in the order the profile asks for
+    candidates: dict[str, dict] = {}
+    for pl in pools:
+        candidates[pl["label"]] = {"label": pl["label"], "kind": "boxes", "current": pl["current"], "max": pl["max"], "style": pl["style"]}
+    if track:
+        candidates[track["label"]] = {"label": track["label"], "kind": "boxes", "current": track["rating"], "max": 10, "style": "will"}
+    if wheel:
+        candidates[wheel["left"]["label"]] = {"label": wheel["left"]["label"], "kind": "bar", "current": wheel["left"]["current"], "max": wheel["size"], "style": "quint"}
+        candidates[wheel["right"]["label"]] = {"label": wheel["right"]["label"], "kind": "bar", "current": wheel["right"]["current"], "max": wheel["size"], "style": "paradox"}
+    dmg = sum(1 for b in health["boxes"] if b["mark"])
+    candidates["Health"] = {"label": "Health", "kind": "boxes", "current": dmg, "max": 7, "style": "hurt",
+                            "text": health["status"] + (f" ({health['penalty']})" if health["penalty"] else "")}
+    panel = [candidates[label] for label in layout.panel if label in candidates]
+    for label, c in candidates.items():  # anything the profile did not name but the sheet has
+        if label not in layout.panel and label != "Health" and (c["current"] is not None):
+            panel.append(c)
+
+    subtitle_bits = []
+    for key in layout.subtitle:
+        v = ident_vals.get(key)
+        if v in (None, ""):
+            continue
+        subtitle_bits.append(f"{_ordinal(_generation(v))} generation" if key == "generation" and _generation(v) else text(v))
     return {
         "empty": False,
+        "game": profile.id,
         "name": text(name),
-        "subtitle": " · ".join(b for b in subtitle_bits if b),
+        "subtitle": " · ".join(subtitle_bits),
         "identity": identity,
         "max_dots": max_trait,
         "attributes": attributes,
         "abilities": abilities,
-        "disciplines": disciplines,
-        "paths": paths,
-        "rituals": rituals,
-        "backgrounds": backgrounds,
-        "virtues": virtues,
+        "groups": groups,
         "merits_flaws": merits_flaws,
-        "morality": morality,
-        "willpower": willpower,
-        "blood": blood,
+        "status": {"track": track, "pools": pools, "wheel": wheel, "texts": texts},
         "health": health,
         "experience": experience,
-        "weakness": text(weakness) if weakness else None,
+        "panel": panel,
         "extras": extras,
         "inventory": inv,
     }

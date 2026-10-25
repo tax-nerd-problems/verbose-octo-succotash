@@ -10,10 +10,11 @@ from typing import Iterator
 
 import anthropic
 
-from . import config, meter
+from . import config, games, meter
 from .db import DB
+from .games import GameProfile
 from .sheet import sheet_view
-from .tools import TOOL_SPECS, ToolContext, _item_line
+from .tools import ToolContext, _item_line, tool_specs
 from .vault import Vault, _read_text
 
 Event = dict
@@ -28,13 +29,15 @@ def _load(path: Path) -> str:
     return _read_text(path).strip()
 
 
-def build_system(campaign: str, vault_root: Path | None = None) -> list[dict]:
+def build_system(profile: GameProfile | str, campaign: str, vault_root: Path | None = None) -> list[dict]:
     """System prompt as a list of text blocks. The whole prefix is stable, so the
     last block carries the cache breakpoint and every turn after the first reads
     it from cache."""
-    camp = config.CAMPAIGNS[campaign]
+    if isinstance(profile, str):  # an old caller passing a campaign id
+        profile, campaign = games.get("vtm"), profile
+    camp = profile.campaigns[campaign]
     root = Path(vault_root or config.VAULT_DIR)
-    parts = [_load(config.APP_DIR / "prompts" / "system.md")]
+    parts = [_load(profile.prompts_dir / "system.md")]
     docs = []
     for pattern in camp["core"]:
         for p in sorted(glob.glob(str(root / pattern))):
@@ -42,7 +45,7 @@ def build_system(campaign: str, vault_root: Path | None = None) -> list[dict]:
             rel = p.relative_to(root).as_posix()
             docs.append(f"<document path=\"{rel}\">\n{_load(p)}\n</document>")
     parts.append("# The chronicle bible\n\n" + "\n\n".join(docs))
-    parts.append(_load(Path(camp["premise"])))
+    parts.append(_load(profile.prompts_dir / camp["premise"]))
     blocks = [{"type": "text", "text": t} for t in parts]
     blocks[-1]["cache_control"] = cache_marker()
     return blocks
@@ -60,11 +63,18 @@ def prefix_hash(system: list[dict], tools: list[dict]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def profile_of(ch: dict) -> GameProfile:
+    return games.get(ch.get("game") or "vtm")
+
+
 def public_state(ch: dict) -> dict:
     """What the browser is allowed to see: never the Storyteller's private notes."""
+    profile = profile_of(ch)
     return {
+        "game": profile.id,
+        "game_label": profile.label,
         "scene": ch.get("scene") or {},
-        "view": sheet_view(ch.get("sheet"), ch.get("inventory")),
+        "view": sheet_view(ch.get("sheet"), ch.get("inventory"), profile),
         "meter": meter.view(ch.get("usage") or {}),
     }
 
@@ -75,7 +85,7 @@ def _state_message(ch: dict) -> str:
     sheet = ch.get("sheet") or {}
     items = (ch.get("inventory") or {}).get("items", [])
     notes = ch.get("notes") or {}
-    keys = ("name", "clan", "generation", "blood", "blood_max", "willpower", "willpower_max", "humanity", "path", "health")
+    keys = profile_of(ch).state_keys
     brief = {
         "scene": scene,
         "sheet_summary": {k: sheet.get(k) for k in keys if k in sheet} if sheet else "no sheet yet",
@@ -128,23 +138,39 @@ def _is_thinking_binding_error(e: anthropic.APIStatusError) -> bool:
 
 
 class Storyteller:
-    def __init__(self, db: DB | None = None, vault: Vault | None = None, client: anthropic.Anthropic | None = None):
+    def __init__(self, db: DB | None = None, vault: Vault | None = None, client: anthropic.Anthropic | None = None,
+                 vaults: dict[str, Vault] | None = None):
         self.db = db or DB()
-        self.vault = vault or Vault()
+        if vaults is not None:
+            self.vaults = dict(vaults)
+        elif vault is not None:
+            self.vaults = {"vtm": vault}
+        else:
+            self.vaults = {g: Vault(p) for g, p in config.discover_vaults().items()}
         self.client = client or anthropic.Anthropic()
-        self._system_cache: dict[str, list[dict]] = {}
+        self._system_cache: dict[tuple[str, str], list[dict]] = {}
 
-    def system_for(self, campaign: str) -> list[dict]:
-        if campaign not in self._system_cache:
-            self._system_cache[campaign] = build_system(campaign, self.vault.root)
-        return self._system_cache[campaign]
+    @property
+    def vault(self) -> Vault:  # the home vault, for callers that only know one
+        return self.vaults.get("vtm") or next(iter(self.vaults.values()))
 
-    def _request_kwargs(self, campaign: str, messages: list[dict]) -> dict:
+    def vault_for(self, ch: dict) -> Vault | None:
+        return self.vaults.get(ch.get("game") or "vtm")
+
+    def system_for(self, profile: GameProfile, campaign: str) -> list[dict]:
+        key = (profile.id, campaign)
+        if key not in self._system_cache:
+            vault = self.vaults[profile.id]
+            self._system_cache[key] = build_system(profile, campaign, vault.root)
+        return self._system_cache[key]
+
+    def _request_kwargs(self, ch: dict, messages: list[dict]) -> dict:
+        profile = profile_of(ch)
         kw: dict = dict(
             model=config.MODEL,
             max_tokens=config.MAX_TOKENS,
-            system=self.system_for(campaign),
-            tools=TOOL_SPECS,
+            system=self.system_for(profile, ch["campaign"]),
+            tools=tool_specs(profile),
             messages=messages,
             output_config={"effort": config.EFFORT},
             # Automatic caching of the conversation tail: the breakpoint moves forward
@@ -209,13 +235,14 @@ class Storyteller:
                 yield {"kind": "done", **public_state(ch)}
             return
         yield {"kind": "working", "name": "compaction"}
+        profile = profile_of(ch)
         kw = dict(
             model=config.MODEL,
             max_tokens=16000,
-            system=self.system_for(ch["campaign"]),
-            tools=TOOL_SPECS,
+            system=self.system_for(profile, ch["campaign"]),
+            tools=tool_specs(profile),
             messages=older,
-            compaction={"type": "summarize", "instructions": _load(config.APP_DIR / "prompts" / "compaction.md")},
+            compaction={"type": "summarize", "instructions": _load(profile.prompts_dir / "compaction.md")},
             betas=[COMPACTION_BETA],
         )
         try:
@@ -283,7 +310,8 @@ class Storyteller:
         them. If either changed since this chronicle's last turn (an app update, or an edit to
         a note in the cached prompt), drop the old blocks once so the API keeps accepting the
         history."""
-        h = prefix_hash(self.system_for(ch["campaign"]), TOOL_SPECS)
+        profile = profile_of(ch)
+        h = prefix_hash(self.system_for(profile, ch["campaign"]), tool_specs(profile))
         if ch.get("prefix_hash") == h:
             return
         if self.db.has_messages(ch["id"]):
@@ -303,7 +331,10 @@ class Storyteller:
         if not ch:
             yield {"kind": "error", "message": "no such chronicle"}
             return
-        campaign = ch["campaign"]
+        vault = self.vault_for(ch)
+        if vault is None:
+            yield {"kind": "error", "message": f"no vault is available for the game '{ch.get('game')}'; see the README on vaults"}
+            return
         self._sync_prefix(ch)
         repaired = self._repair_history(ch)
         if repaired:
@@ -318,7 +349,7 @@ class Storyteller:
             else:
                 pending.append(self.db.append_event(chronicle_id, kind, payload))
 
-        ctx = ToolContext(self.db, self.vault, chronicle_id, emit, chronicle_name=ch["name"])
+        ctx = ToolContext(self.db, vault, chronicle_id, emit, chronicle_name=ch["name"], profile=profile_of(ch))
 
         player_event = None
         if player_text is not None:
@@ -343,7 +374,7 @@ class Storyteller:
             messages = self.db.get_messages(chronicle_id)
             text_buf: list[str] = []
             try:
-                with self.client.beta.messages.stream(**self._request_kwargs(campaign, messages)) as stream:
+                with self.client.beta.messages.stream(**self._request_kwargs(ch, messages)) as stream:
                     for event in stream:
                         if event.type == "text":
                             text_buf.append(event.text)

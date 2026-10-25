@@ -69,6 +69,17 @@
   .bx.blood { background: var(--accent); border-color: var(--accent); }
   .bx.will { background: var(--accent-2); border-color: var(--accent-2); }
   .bx.hurt { background: #6b5a70; border-color: #6b5a70; }
+  .bx.quint, .sq.quint { background: #3f7fb8; border-color: #3f7fb8; }
+  .bx.paradox, .sq.paradox { background: #8d3fb8; border-color: #8d3fb8; }
+  .minibar { height: 8px; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 3px; overflow: hidden; }
+  .minibar .f { height: 100%; }
+  .minibar .f.quint { background: #3f7fb8; } .minibar .f.paradox { background: #8d3fb8; } .minibar .f.will { background: var(--accent-2); } .minibar .f.blood { background: var(--accent); }
+  .wheel { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+  .wheel .sq { width: auto; aspect-ratio: 1; }
+  .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent-2); border: 1px solid var(--accent-2); border-radius: 999px; padding: 0 5px; margin-left: 6px; vertical-align: middle; }
+  .gpill { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+  .dice .need { color: var(--muted); }
+  .dice .px { color: #b07ad6; font-weight: 600; }
   .onyou { list-style: none; padding: 0; margin: 0; }
   .onyou li { padding: 4px 0; border-bottom: 1px dotted var(--line); display: flex; gap: 8px; align-items: baseline; }
   .onyou li .q { color: var(--muted); font-family: var(--mono); font-size: 12px; }
@@ -196,6 +207,7 @@
 <header>
   <h1>STORYTELLER</h1>
   <select id="chronicles" title="Chronicle" aria-label="Chronicle"></select>
+  <span class="gpill" id="gamePill" hidden></span>
   <button id="new" title="Start a new chronicle">New<span class="wide"> chronicle</span></button>
   <div class="scene" id="scene"></div>
   <span class="pill" id="tension" hidden></span>
@@ -235,6 +247,7 @@
   <form method="dialog">
     <strong>New chronicle</strong>
     <label for="dlgName">Name</label><input id="dlgName" placeholder="e.g. Anja in New York" required>
+    <div id="dlgGameRow"><label for="dlgGame">Game</label><select id="dlgGame"></select></div>
     <label for="dlgCamp">Campaign</label><select id="dlgCamp"></select>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
       <button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Create and begin</button>
@@ -327,12 +340,15 @@ function renderEvent(ev) {
         s.textContent = d; row.appendChild(s);
       });
       n.appendChild(row);
-      n.appendChild(el("label", `diff ${ev.difficulty}${ev.specialty ? " · specialty" : ""}${ev.willpower ? " · Willpower" : ""}`));
+      const kind = ev.magick ? ` · ${({coincidental: "coincidental", vulgar_unwitnessed: "vulgar, unseen", vulgar_witnessed: "vulgar, witnessed"})[ev.magick_kind] || ev.magick_kind}` : "";
+      n.appendChild(el("label", `diff ${ev.difficulty}${kind}${ev.specialty ? " · specialty" : ""}${ev.willpower ? " · Willpower" : ""}`));
+      if (ev.magick) n.appendChild(el("need", `need ${ev.needed}`));
       n.appendChild(el("res" + (ev.botch ? " botch" : ""), esc(ev.summary)));
+      if (ev.magick && ev.paradox_gained) n.appendChild(el("px", `+${ev.paradox_gained} Paradox`));
     }
   }
   else if (ev.kind === "trait") {
-    n = el("trait", `${esc(ev.reason)} <span class="dim">(${esc(ev.path)}: ${esc(fmt(ev.old))} → ${esc(fmt(ev.new))})</span>`);
+    n = el("trait", esc(ev.reason) + (ev.path ? ` <span class="dim">(${esc(ev.path)}: ${esc(fmt(ev.old))} → ${esc(fmt(ev.new))})</span>` : ""));
     n.title = "Open character sheet"; n.onclick = () => openSheet("character");
   }
   else if (ev.kind === "item") {
@@ -373,19 +389,20 @@ function boxes(cur, max, cls) {
   for (let i = 0; i < max; i++) h += `<span class="bx${i < cur ? " " + cls : ""}"></span>`;
   return `<span class="boxes" aria-hidden="true">${h}</span>`;
 }
+function minibar(cur, max, style) {
+  const pct = max ? Math.min(100, Math.round(100 * (Number(cur) || 0) / max)) : 0;
+  return `<span class="minibar" aria-hidden="true"><span class="f ${style}" style="width:${pct}%"></span></span>`;
+}
 function renderSide(v) {
   const who = $("#who"), onyou = $("#onyou");
   if (!v || v.empty) {
     who.innerHTML = '<div class="sub">No sheet yet. The Storyteller builds it with you at the start.</div>';
   } else {
     let h = `<div class="name">${esc(v.name)}</div><div class="sub">${esc(v.subtitle)}</div>`;
-    if (v.blood) h += `<div class="trk"><span>Blood</span>${boxes(v.blood.current, v.blood.max, "blood")}<span class="v">${v.blood.current ?? "?"}/${v.blood.max ?? "?"}</span></div>`;
-    if (v.willpower) h += `<div class="trk"><span>Willpower</span>${boxes(v.willpower.current, v.willpower.max, "will")}<span class="v">${v.willpower.current ?? "?"}/${v.willpower.max ?? "?"}</span></div>`;
-    if (v.morality) h += `<div class="trk"><span>${esc(v.morality.label)}</span>${boxes(v.morality.rating, 10, "will")}<span class="v">${v.morality.rating ?? "?"}</span></div>`;
-    if (v.health) {
-      const dmg = v.health.boxes.filter(b => b.mark).length;
-      const pen = v.health.penalty ? ` (${v.health.penalty})` : "";
-      h += `<div class="trk"><span>Health</span>${boxes(dmg, 7, "hurt")}<span class="v">${esc(v.health.status)}${esc(pen)}</span></div>`;
+    for (const t of v.panel || []) {
+      const vis = t.kind === "bar" ? minibar(t.current, t.max, t.style) : boxes(t.current, t.max, t.style);
+      const val = t.text ? esc(t.text) : `${t.current ?? "?"}${t.max && t.kind !== "dots" && t.label !== "Humanity" && t.label !== "Arete" && !(t.max === 10 && t.style === "will" && t.label !== "Willpower") ? "/" + t.max : ""}`;
+      h += `<div class="trk"><span>${esc(t.label)}</span>${vis}<span class="v">${val}</span></div>`;
     }
     who.innerHTML = h;
   }
@@ -426,24 +443,32 @@ function characterTab(v) {
   if (v.identity.length) h += `<div class="sec"><div class="ident">${v.identity.map(f => `<div><span>${esc(f.label)}</span>${esc(f.value)}</div>`).join("")}</div></div>`;
   h += `<div class="sec"><h3>Attributes</h3><div class="cols">${v.attributes.map(g => col(g.group, g.traits.map(t => traitRow(t, md)).join(""))).join("")}</div></div>`;
   h += `<div class="sec"><h3>Abilities</h3><div class="cols">${v.abilities.map(g => col(g.group, g.traits.map(t => traitRow(t, md)).join(""))).join("")}</div></div>`;
-  const disc = v.disciplines.map(t => traitRow(t, md, "note")).join("") || '<div class="muted">None</div>';
-  const paths = v.paths.length ? blk("Paths", v.paths.map(t => traitRow(t, md, "note")).join("")) : "";
-  const rituals = v.rituals.length ? blk("Rituals", v.rituals.map(t => `<div class="row"><span class="nm">${esc(t.name)}${t.note ? `<small>${esc(t.note)}</small>` : ""}</span>${t.rating != null ? `<span class="dots">Lv ${t.rating}</span>` : ""}</div>`).join("")) : "";
-  h += `<div class="sec"><h3>Advantages</h3><div class="cols">`
-     + `<div class="col">${blk("Disciplines", disc)}${paths}${rituals}</div>`
-     + col("Backgrounds", v.backgrounds.map(t => traitRow(t, 5, "note")).join("") || '<div class="muted">None</div>')
-     + col("Virtues", v.virtues.map(t => traitRow(t, 5, "note")).join("") || '<div class="muted">None</div>')
-     + `</div></div>`;
+  const groups = (v.groups || []).filter(g => g.traits.length);
+  const groupRow = (t, g) => {
+    const name = esc(t.name) + (t.mark ? `<span class="tag">${esc(g.mark_label || "affinity")}</span>` : "");
+    const right = g.max === 0 ? (t.rating != null ? `<span class="dots">Lv ${t.rating}</span>` : "") : dots(t.rating, g.max || md);
+    return `<div class="row${t.rating ? "" : " zero"}"><span class="nm">${name}${t.note ? `<small>${esc(t.note)}</small>` : ""}</span>${right}</div>`;
+  };
+  if (groups.length) h += `<div class="sec"><h3>Advantages</h3><div class="cols">${groups.map(g => col(g.title, g.traits.map(t => groupRow(t, g)).join(""))).join("")}</div></div>`;
   // status row
+  const st = v.status || {};
   const mf = v.merits_flaws.length
     ? v.merits_flaws.map(m => `<div class="mf ${m.kind || ""}"><span>${esc(m.name)}${m.note ? `<span class="dim"> · ${esc(m.note)}</span>` : ""}</span><span class="pts">${m.points != null ? `${m.points} pt` : ""}${m.kind ? " " + esc(m.kind) : ""}</span></div>`).join("")
     : '<div class="muted">None</div>';
   let left = blk("Merits & Flaws", mf);
-  if (v.weakness) left += blk("Weakness", `<div class="prose">${esc(v.weakness)}</div>`);
+  for (const t of st.texts || []) left += blk(t.label, `<div class="prose">${esc(t.text)}</div>`);
   let mid = "";
-  if (v.morality) mid += `<div class="track"><div class="lbl"><span>${esc(v.morality.label)}</span><b>${v.morality.rating ?? "?"}</b></div>${dots(v.morality.rating, 10)}</div>`;
-  if (v.willpower) mid += `<div class="track"><div class="lbl"><span>Willpower</span><b>${v.willpower.current ?? "?"} / ${v.willpower.max ?? "?"}</b></div>${dots(v.willpower.max, 10)}<div style="height:6px"></div>${squares(v.willpower.current, v.willpower.max, "will")}</div>`;
-  if (v.blood) mid += `<div class="track"><div class="lbl"><span>Blood pool</span><b>${v.blood.current ?? "?"} / ${v.blood.max ?? "?"}</b></div>${squares(v.blood.current, v.blood.max, "blood")}${v.blood.per_turn ? `<div class="legend">Spend up to ${v.blood.per_turn} per turn</div>` : ""}</div>`;
+  if (st.track) mid += `<div class="track"><div class="lbl"><span>${esc(st.track.label)}</span><b>${st.track.rating ?? "?"}</b></div>${dots(st.track.rating, st.track.max || 10)}</div>`;
+  for (const pl of st.pools || []) {
+    if (pl.style === "will") mid += `<div class="track"><div class="lbl"><span>${esc(pl.label)}</span><b>${pl.current ?? "?"} / ${pl.max ?? "?"}</b></div>${dots(pl.max, 10)}<div style="height:6px"></div>${squares(pl.current, pl.max, "will")}</div>`;
+    else mid += `<div class="track"><div class="lbl"><span>${esc(pl.label)}</span><b>${pl.current ?? "?"} / ${pl.max ?? "?"}</b></div>${squares(pl.current, pl.max, pl.style)}${pl.note ? `<div class="legend">${esc(pl.note)}</div>` : ""}</div>`;
+  }
+  if (st.wheel) {
+    const w = st.wheel, L = Number(w.left.current) || 0, R = Number(w.right.current) || 0;
+    let cells = "";
+    for (let i = 0; i < w.size; i++) cells += `<span class="sq${i < L ? " quint" : i >= w.size - R ? " paradox" : ""}"></span>`;
+    mid += `<div class="track"><div class="lbl"><span>${esc(w.left.label)} <b>${L}</b></span><span><b>${R}</b> ${esc(w.right.label)}</span></div><div class="wheel">${cells}</div><div class="legend">${w.size}-point wheel: ${esc(w.left.label)} fills from the left, ${esc(w.right.label)} from the right</div></div>`;
+  }
   let right = "";
   if (v.health) {
     const marks = {"*": "agg", "X": "leth", "/": "bash", "•": "gen"};
@@ -520,6 +545,8 @@ function renderMeter(m) {
 }
 function applyState(st) {
   view = st.view; renderSide(view); renderScene(st.scene); renderMeter(st.meter);
+  const gp = $("#gamePill"); const g = cfg && st.game && cfg.games[st.game];
+  gp.hidden = !g || Object.values(cfg.games).filter(x => x.vault).length < 2; if (g) gp.textContent = g.short;
   if ($("#sheetDlg").open) renderSheetDlg();
 }
 
@@ -611,10 +638,18 @@ $("#delete").onclick = async () => {
   if (list[0]) { $("#chronicles").value = list[0].id; openChronicle(list[0].id); }
   else { feed.innerHTML = '<div class="empty">Create or choose a chronicle to begin.</div>'; applyState({scene: {}, view: {empty: true, inventory: {carried: [], stashed: [], count: 0}}, meter: null}); }
 };
-$("#new").onclick = () => { $("#dlgName").value = ""; $("#dlg").showModal(); };
+function fillCampaigns() {
+  const g = cfg.games[$("#dlgGame").value];
+  $("#dlgCamp").innerHTML = g ? Object.entries(g.campaigns).map(([k, v]) => `<option value="${k}" ${k === g.default_campaign ? "selected" : ""}>${esc(v)}</option>`).join("") : "";
+}
+$("#dlgGame").onchange = fillCampaigns;
+$("#new").onclick = () => { $("#dlgName").value = ""; fillCampaigns(); $("#dlg").showModal(); };
 $("#dlg").addEventListener("close", async () => {
   if ($("#dlg").returnValue !== "ok") return;
-  const ch = await (await api("/chronicles", {method: "POST", body: JSON.stringify({name: $("#dlgName").value, campaign: $("#dlgCamp").value})})).json();
+  let ch;
+  try {
+    ch = await (await api("/chronicles", {method: "POST", body: JSON.stringify({name: $("#dlgName").value, game: $("#dlgGame").value, campaign: $("#dlgCamp").value})})).json();
+  } catch (e) { alert(e.message); return; }
   await loadChronicles(); await openChronicle(ch.id);
   stream(`/chronicles/${ch.id}/begin`);
 });
@@ -625,8 +660,12 @@ fold.addEventListener("toggle", () => { try { localStorage.setItem("st:memory", 
 
 (async () => {
   cfg = await (await api("/config")).json();
-  $("#cfg").innerHTML = `<div>model</div><div>${esc(cfg.model)}</div><div>effort</div><div>${esc(cfg.effort)}</div><div>vault</div><div title="${esc(cfg.vault)}">${esc(cfg.vault.split(/[\\/]/).pop())}</div>`;
-  $("#dlgCamp").innerHTML = Object.entries(cfg.campaigns).map(([k, v]) => `<option value="${k}" ${k === cfg.default_campaign ? "selected" : ""}>${esc(v)}</option>`).join("");
+  const vaultRows = Object.entries(cfg.games).filter(([, g]) => g.vault).map(([, g]) => `<div>${esc(g.short)} vault</div><div title="${esc(g.vault)}">${esc(g.vault.split(/[\\/]/).pop())}</div>`).join("");
+  $("#cfg").innerHTML = `<div>model</div><div>${esc(cfg.model)}</div><div>effort</div><div>${esc(cfg.effort)}</div>${vaultRows}`;
+  const withVault = Object.entries(cfg.games).filter(([, g]) => g.vault);
+  $("#dlgGame").innerHTML = Object.entries(cfg.games).map(([k, g]) => `<option value="${k}" ${k === cfg.default_game ? "selected" : ""} ${g.vault ? "" : "disabled"}>${esc(g.label)}${g.vault ? "" : " (no vault found)"}</option>`).join("");
+  $("#dlgGameRow").hidden = withVault.length < 2;
+  fillCampaigns();
   const list = await loadChronicles();
   let last = null; try { last = localStorage.getItem("st:last"); } catch (e) {}
   const pick = list.find(c => c.id === last) || list[0];

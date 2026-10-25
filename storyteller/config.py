@@ -48,23 +48,51 @@ PRICES: dict[str, tuple[float, float, float, float, float]] = {
 # Where the Storyteller may create new notes inside the vault.
 SESSION_LOG_DIR = os.environ.get("ST_SESSION_DIR", "Sessions")
 
-# Files loaded into the cached system prompt, per campaign. Paths are relative
-# to the vault root and may be globs. Everything else in the vault is reachable
-# through the search_vault / read_note tools on demand.
-CAMPAIGNS: dict[str, dict] = {
-    "campaign1": {
-        "label": "Campaign 1 — New York, 2001",
-        "premise": APP_DIR / "prompts" / "campaign1_premise.md",
-        "core": [
-            "Storyteller Reference/*.md",
-            "Campaign 1 - Storyteller Overview.md",
-            "Campaign 1 Blurb.md",
-            "Setting/Campaign 1 Locations.md",
-            "Setting/NYC Current State.md",
-            "Setting/NYC Geography and Domains.md",
-            "Setting/NYC Kindred History.md",
-            "Setting/Telling the Tale.md",
-        ],
-    },
-}
-DEFAULT_CAMPAIGN = os.environ.get("ST_CAMPAIGN", "campaign1")
+# Vaults. The vault this folder sits in is the home vault. Other vaults are found
+# next to it (sibling folders holding an "AI Storyteller.md" note whose frontmatter
+# names the game) or listed in ST_EXTRA_VAULTS (paths separated by the OS path
+# separator; "game=path" pins the game). One vault per game.
+EXTRA_VAULTS = os.environ.get("ST_EXTRA_VAULTS", "")
+MARKER = "AI Storyteller.md"
+
+
+def vault_game(path: Path) -> str | None:
+    """The game id a vault declares in its marker note, or None if it has no marker."""
+    marker = path / MARKER
+    if not marker.is_file():
+        return None
+    try:
+        import frontmatter
+        meta = frontmatter.loads(marker.read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")).metadata
+        g = meta.get("game")
+        return str(g).strip().lower() if g else None
+    except Exception:
+        return None
+
+
+def discover_vaults() -> dict[str, Path]:
+    """game id -> vault path. The home vault counts as VTM unless its marker says otherwise."""
+    found: dict[str, Path] = {}
+    home = VAULT_DIR
+    found[vault_game(home) or "vtm"] = home
+    for entry in EXTRA_VAULTS.split(os.pathsep):
+        entry = entry.strip()
+        if not entry:
+            continue
+        game, _, raw = entry.rpartition("=") if "=" in entry else ("", "", entry)
+        path = Path(raw).expanduser().resolve()
+        g = (game.strip().lower() or vault_game(path)) if path.is_dir() else None
+        if g and g not in found:
+            found[g] = path
+    try:
+        siblings = sorted(p for p in home.parent.iterdir() if p.is_dir() and p != home)
+    except OSError:
+        siblings = []
+    for path in siblings:
+        g = vault_game(path)
+        if g and g not in found:
+            found[g] = path.resolve()
+    return found
+
+
+DEFAULT_GAME = os.environ.get("ST_GAME", "") or (vault_game(VAULT_DIR) or "vtm")

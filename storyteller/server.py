@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import config
+from . import config, games
 from .storyteller import Storyteller, public_state
 
 app = FastAPI(title="AI Storyteller")
@@ -53,7 +53,8 @@ def st() -> Storyteller:
 
 class NewChronicle(BaseModel):
     name: str
-    campaign: str = config.DEFAULT_CAMPAIGN
+    game: str = ""
+    campaign: str = ""
 
 
 class Turn(BaseModel):
@@ -67,13 +68,23 @@ def index():
 
 @app.get("/api/config")
 def get_config():
+    vaults = {g: str(v.root) for g, v in st().vaults.items()}
     return {
         "model": config.MODEL,
         "effort": config.EFFORT,
         "cache_ttl": config.CACHE_TTL,
         "compaction": {"enabled": config.ENABLE_COMPACTION, "at": config.COMPACT_AT, "session_end": config.COMPACT_AT_SESSION_END, "keep_turns": config.KEEP_RECENT_TURNS},
-        "campaigns": {k: v["label"] for k, v in config.CAMPAIGNS.items()},
-        "default_campaign": config.DEFAULT_CAMPAIGN,
+        "games": {
+            gid: {
+                "label": prof.label,
+                "short": prof.short,
+                "campaigns": {k: v["label"] for k, v in prof.campaigns.items()},
+                "default_campaign": prof.default_campaign,
+                "vault": vaults.get(gid),
+            }
+            for gid, prof in games.all_games().items()
+        },
+        "default_game": config.DEFAULT_GAME if config.DEFAULT_GAME in vaults else next(iter(vaults), "vtm"),
         "vault": str(config.VAULT_DIR),
     }
 
@@ -85,9 +96,18 @@ def list_chronicles():
 
 @app.post("/api/chronicles")
 def create_chronicle(body: NewChronicle):
-    if body.campaign not in config.CAMPAIGNS:
+    game = body.game or config.DEFAULT_GAME
+    try:
+        prof = games.get(game)
+    except KeyError:
+        raise HTTPException(400, f"unknown game {game!r}")
+    if game not in st().vaults:
+        raise HTTPException(400, f"no vault is available for {prof.label}; see the README on vaults")
+    campaign = body.campaign or prof.default_campaign
+    if campaign not in prof.campaigns:
         raise HTTPException(400, "unknown campaign")
-    ch = st().db.create_chronicle(body.name.strip() or "Untitled chronicle", body.campaign)
+    ch = st().db.create_chronicle(body.name.strip() or "Untitled chronicle", campaign, game)
+    ch.pop("notes", None)
     return ch
 
 
