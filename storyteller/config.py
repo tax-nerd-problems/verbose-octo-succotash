@@ -8,9 +8,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APP_DIR = Path(__file__).resolve().parent
-# The Obsidian vault is the parent of this folder.
-VAULT_DIR = Path(os.environ.get("VAULT_DIR", APP_DIR.parent)).resolve()
+APP_DIR = Path(__file__).resolve().parent  # this package
+APP_ROOT = APP_DIR.parent  # the app's own folder (the repository root)
 DB_PATH = Path(os.environ.get("ST_DB_PATH", APP_DIR / "chronicles.db"))
 
 MODEL = os.environ.get("ST_MODEL", "claude-opus-5-5")
@@ -48,11 +47,16 @@ PRICES: dict[str, tuple[float, float, float, float, float]] = {
 # Where the Storyteller may create new notes inside the vault.
 SESSION_LOG_DIR = os.environ.get("ST_SESSION_DIR", "Sessions")
 
-# Vaults. The vault this folder sits in is the home vault. Other vaults are found
-# next to it (sibling folders holding an "AI Storyteller.md" note whose frontmatter
-# names the game) or listed in ST_EXTRA_VAULTS (paths separated by the OS path
-# separator; "game=path" pins the game). One vault per game.
-EXTRA_VAULTS = os.environ.get("ST_EXTRA_VAULTS", "")
+# Vaults. A vault is an Obsidian folder holding an "AI Storyteller.md" note whose
+# frontmatter names the game (game: vtm, game: mage). The app looks for vaults in the
+# folders beside its own folder, so the usual layout is one parent folder holding the
+# app folder and a folder per vault. ST_VAULTS lists vault folders anywhere else (paths
+# separated by the OS path separator; "game=path" pins the game). One vault per game:
+# the first found wins, in the order ST_VAULTS, VAULT_DIR, the folders beside the app.
+VAULTS = os.environ.get("ST_VAULTS", "") or os.environ.get("ST_EXTRA_VAULTS", "")
+# The first release's single-vault setting. A folder it names counts as Vampire even
+# without a marker, because that release had no marker.
+VAULT_DIR = os.environ.get("VAULT_DIR", "")
 MARKER = "AI Storyteller.md"
 
 
@@ -70,45 +74,56 @@ def vault_game(path: Path) -> str | None:
         return None
 
 
+def vaults_beside_app() -> list[Path]:
+    """The app's own folder (the first release kept the app inside the Vampire vault) and
+    the folders next to it, in name order. Hidden folders are skipped."""
+    out = [APP_ROOT]
+    try:
+        out += sorted(p for p in APP_ROOT.parent.iterdir() if p.is_dir() and p != APP_ROOT and not p.name.startswith("."))
+    except OSError:
+        pass
+    return out
+
+
 def discover_vaults() -> dict[str, Path]:
-    """game id -> vault path. The home vault counts as VTM unless its marker says otherwise."""
+    """game id -> vault folder, for every game whose vault could be found."""
+    import logging
+
     from . import games
     known = set(games.all_games())
+    log = logging.getLogger("storyteller")
     found: dict[str, Path] = {}
-    home = VAULT_DIR
-    home_game = vault_game(home)
-    if home_game and home_game not in known:
-        import logging
-        logging.getLogger("storyteller").warning("the home vault's marker names an unknown game %r; treating it as vtm", home_game)
-        home_game = None
-    found[home_game or "vtm"] = home
 
     def add(path: Path, game: str | None, where: str) -> None:
-        g = (game or "").strip().lower() or vault_game(path)
-        if not path.is_dir() or not g:
+        if not path.is_dir():
             return
+        g = (game or "").strip().lower() or vault_game(path)
+        if not g:
+            if where != "VAULT_DIR":
+                return
+            g = "vtm"
         if g not in known:
-            import logging
-            logging.getLogger("storyteller").warning("ignoring %s %s: its marker names an unknown game %r", where, path, g)
+            log.warning("ignoring %s %s: its marker names an unknown game %r", where, path, g)
             return
         found.setdefault(g, path.resolve())
 
-    for entry in EXTRA_VAULTS.split(os.pathsep):
+    for entry in VAULTS.split(os.pathsep):
         entry = entry.strip()
         if not entry:
             continue
         head, sep, tail = entry.partition("=")
         if sep and head.strip().lower() in known:  # "game=path"; a bare path may itself contain "="
-            add(Path(tail).expanduser(), head, "ST_EXTRA_VAULTS entry")
+            add(Path(tail.strip()).expanduser(), head, "ST_VAULTS entry")
         else:
-            add(Path(entry).expanduser(), None, "ST_EXTRA_VAULTS entry")
-    try:
-        siblings = sorted(p for p in home.parent.iterdir() if p.is_dir() and p != home)
-    except OSError:
-        siblings = []
-    for path in siblings:
-        add(path, None, "sibling vault")
+            add(Path(entry).expanduser(), None, "ST_VAULTS entry")
+    if VAULT_DIR:
+        add(Path(VAULT_DIR).expanduser(), None, "VAULT_DIR")
+    for path in vaults_beside_app():
+        add(path, None, "folder beside the app")
+    if not found:
+        log.warning("no vault found beside %s; see the README on vaults", APP_ROOT)
     return found
 
 
-DEFAULT_GAME = os.environ.get("ST_GAME", "") or (vault_game(VAULT_DIR) or "vtm")
+# The game the New chronicle dialog starts on. Empty means the first vault found.
+DEFAULT_GAME = os.environ.get("ST_GAME", "").strip().lower()

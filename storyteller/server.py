@@ -84,9 +84,17 @@ def get_config():
             }
             for gid, prof in games.all_games().items()
         },
-        "default_game": config.DEFAULT_GAME if config.DEFAULT_GAME in vaults else next(iter(vaults), "vtm"),
-        "vault": str(config.VAULT_DIR),
+        "default_game": default_game(),
+        "app_dir": str(config.APP_ROOT),
     }
+
+
+def default_game() -> str:
+    """ST_GAME when its vault was found, else the first game with a vault, else Vampire."""
+    vaults = st().vaults
+    if config.DEFAULT_GAME in vaults:
+        return config.DEFAULT_GAME
+    return next(iter(vaults), "vtm")
 
 
 @app.get("/api/chronicles")
@@ -96,7 +104,7 @@ def list_chronicles():
 
 @app.post("/api/chronicles")
 def create_chronicle(body: NewChronicle):
-    game = body.game or config.DEFAULT_GAME
+    game = body.game or default_game()
     try:
         prof = games.get(game)
     except KeyError:

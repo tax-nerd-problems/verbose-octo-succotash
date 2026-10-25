@@ -91,7 +91,9 @@ class Note:
 
 class Vault:
     def __init__(self, root: Path | None = None):
-        self.root = Path(root or config.VAULT_DIR).resolve()
+        if root is None:
+            raise ValueError("a Vault needs its folder; the app finds vaults with config.discover_vaults()")
+        self.root = Path(root).resolve()
         self.notes: dict[str, Note] = {}  # key: lowercase title (first note wins when titles repeat)
         self.by_rel: dict[str, Note] = {}  # every note, by path
         self.dupes: dict[str, list[Note]] = {}  # titles shared by several notes

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-VAULT = Path(__file__).resolve().parents[2]
+VAULT = Path(__file__).resolve().parent / "fixtures" / "vtm"  # a small synthetic Vampire vault
 
 from storyteller import config, games  # noqa: E402
 from storyteller.db import DB  # noqa: E402
@@ -56,7 +56,7 @@ class VaultTests(unittest.TestCase):
         cls.vault = Vault(VAULT)
 
     def test_index_and_resolve(self):
-        self.assertGreater(len(self.vault.notes), 200)
+        self.assertGreaterEqual(len(self.vault.notes), 12)
         n = self.vault.resolve("[[Hakim Olamaz]]")
         self.assertIsNotNone(n)
         self.assertEqual(n.meta.get("generation"), 7)
@@ -1159,32 +1159,44 @@ class MageProfileTests(unittest.TestCase):
     def test_vault_discovery(self):
         tmp = Path(tempfile.mkdtemp())
         try:
+            app = tmp / "ai-storyteller"; app.mkdir()  # the app's folder, beside the vaults
             home = tmp / "VTM Vault"; home.mkdir()
             (home / "AI Storyteller.md").write_text("---\ngame: vtm\n---\n# x\n")
             sib = tmp / "Mage Vault"; sib.mkdir()
             (sib / "AI Storyteller.md").write_text("---\ngame: mage\ntags: [MTA]\n---\n# x\n")
             (tmp / "Not a vault").mkdir()
+            (tmp / ".hidden").mkdir()
+            (tmp / ".hidden" / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
             extra = tmp / "elsewhere" / "Another"; extra.mkdir(parents=True)
             (extra / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
-            old = (config.VAULT_DIR, config.EXTRA_VAULTS)
+            old = (config.APP_ROOT, config.VAULTS, config.VAULT_DIR)
             try:
-                config.VAULT_DIR, config.EXTRA_VAULTS = home, ""
-                found = config.discover_vaults()
-                self.assertEqual(found, {"vtm": home, "mage": sib.resolve()})
-                config.EXTRA_VAULTS = str(extra)
-                self.assertEqual(config.discover_vaults()["mage"], extra.resolve())  # explicit paths win over siblings
-                config.EXTRA_VAULTS = f"mage={extra}"
+                config.APP_ROOT, config.VAULTS, config.VAULT_DIR = app, "", ""
+                self.assertEqual(config.discover_vaults(), {"vtm": home.resolve(), "mage": sib.resolve()})  # the folders beside the app
+                config.VAULTS = str(extra)
+                self.assertEqual(config.discover_vaults()["mage"], extra.resolve())  # explicit paths win over neighbours
+                config.VAULTS = f"mage={extra}"
                 self.assertEqual(config.discover_vaults()["mage"], extra.resolve())
                 odd = tmp / "a=b"; odd.mkdir()
                 (odd / "AI Storyteller.md").write_text("---\ngame: mage\n---\n# x\n")
-                config.EXTRA_VAULTS = str(odd)
+                config.VAULTS = str(odd)
                 self.assertEqual(config.discover_vaults()["mage"], odd.resolve())  # a path containing "=" is still a path
                 bogus = tmp / "Bogus"; bogus.mkdir()
                 (bogus / "AI Storyteller.md").write_text("---\ngame: werewolf\n---\n# x\n")
-                config.EXTRA_VAULTS = ""
+                config.VAULTS = ""
                 self.assertNotIn("werewolf", config.discover_vaults())  # an unknown game is ignored, not offered
+                # the first release's layout: the package inside the Vampire vault, so the app's folder is the vault
+                config.APP_ROOT = home
+                self.assertEqual(config.discover_vaults(), {"vtm": home.resolve(), "mage": sib.resolve()})
+                # the first release's VAULT_DIR: a folder without a marker counts as Vampire
+                plain = tmp / "elsewhere" / "Plain"; plain.mkdir()
+                lonely = tmp / "lonely" / "app"; lonely.mkdir(parents=True)
+                config.APP_ROOT, config.VAULT_DIR = lonely, str(plain)
+                self.assertEqual(config.discover_vaults(), {"vtm": plain.resolve()})
+                config.VAULT_DIR = ""
+                self.assertEqual(config.discover_vaults(), {})  # nothing found: the app still starts
             finally:
-                config.VAULT_DIR, config.EXTRA_VAULTS = old
+                config.APP_ROOT, config.VAULTS, config.VAULT_DIR = old
         finally:
             shutil.rmtree(tmp)
 

@@ -248,6 +248,7 @@
     <strong>New chronicle</strong>
     <label for="dlgName">Name</label><input id="dlgName" placeholder="e.g. Anja in New York" required>
     <div id="dlgGameRow"><label for="dlgGame">Game</label><select id="dlgGame"></select></div>
+    <div id="dlgNoVault" class="hint" hidden>No vault found. Put a vault folder (one holding an <code>AI Storyteller.md</code> note) next to the app folder and restart the server. The README explains.</div>
     <label for="dlgCamp">Campaign</label><select id="dlgCamp"></select>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
       <button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Create and begin</button>
@@ -669,6 +670,8 @@ fold.addEventListener("toggle", () => { try { localStorage.setItem("st:memory", 
   const withVault = Object.entries(cfg.games).filter(([, g]) => g.vault);
   $("#dlgGame").innerHTML = Object.entries(cfg.games).map(([k, g]) => `<option value="${k}" ${k === cfg.default_game ? "selected" : ""} ${g.vault ? "" : "disabled"}>${esc(g.label)}${g.vault ? "" : " (no vault found)"}</option>`).join("");
   $("#dlgGameRow").hidden = withVault.length < 2;
+  $("#dlgNoVault").hidden = withVault.length > 0;
+  $("#dlg .primary").disabled = withVault.length === 0;
   fillCampaigns();
   const list = await loadChronicles();
   let last = null; try { last = localStorage.getItem("st:last"); } catch (e) {}

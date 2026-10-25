@@ -35,7 +35,9 @@ def build_system(profile: GameProfile | str, campaign: str, vault_root: Path | N
     last block carries the cache breakpoint and every turn after the first reads
     it from cache."""
     camp = profile.campaigns[campaign]
-    root = Path(vault_root or config.VAULT_DIR)
+    if vault_root is None:
+        raise ValueError("build_system needs the vault folder")
+    root = Path(vault_root)
     parts = [_load(profile.prompts_dir / "system.md")]
     docs = []
     for pattern in camp["core"]:
@@ -154,8 +156,8 @@ class Storyteller:
         self._system_cache: dict[tuple[str, str], list[dict]] = {}
 
     @property
-    def vault(self) -> Vault:  # the home vault, for callers that only know one
-        return self.vaults.get("vtm") or next(iter(self.vaults.values()))
+    def vault(self) -> Vault | None:  # the Vampire vault, or the first one, for callers that only know one
+        return self.vaults.get("vtm") or next(iter(self.vaults.values()), None)
 
     def vault_for(self, ch: dict) -> Vault | None:
         return self.vaults.get(ch.get("game") or "vtm")
