@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 import anthropic
+import httpx2
 
 from . import config, games, meter
 from .db import DB
@@ -219,9 +220,7 @@ class Storyteller:
         if not ch:
             yield {"kind": "error", "message": "no such chronicle"}
             return
-        repaired = self._repair_history(ch)
-        if repaired:
-            yield repaired
+        yield from self._repair_history(ch)
         messages = self.db.get_messages(chronicle_id)
         if messages and messages[-1]["role"] != "assistant":
             yield self.db.append_event(chronicle_id, "memory", {"text": "Memory not condensed: the last turn did not finish cleanly. Send another message first."})
@@ -293,17 +292,34 @@ class Storyteller:
         if final:
             yield {"kind": "done", **public_state(self.db.get_chronicle(chronicle_id))}
 
-    def _repair_history(self, ch: dict) -> Event | None:
-        """Bring a history written by an older release into the current shape."""
-        n = self.db.convert_legacy_summary(ch["id"])
-        if not n:
-            return None
-        log.info("chronicle %s: converted %d summary block(s) from the first release", ch["id"], n)
-        self.db.set_recap_due(ch["id"], True)
-        return self.db.append_event(ch["id"], "memory", {
-            "text": "Memory format updated: a summary made by an earlier version of the app was converted so play can continue. "
-                    "The Storyteller will reread its notes next turn."
-        })
+    def _repair_history(self, ch: dict) -> list[Event]:
+        """Bring a stored history into a shape the API accepts (a history written by an older
+        release, or one left broken by an interrupted turn). Returns the transcript events
+        that tell the player what changed."""
+        cid = ch["id"]
+        events: list[Event] = []
+        n = self.db.convert_legacy_summary(cid)
+        if n:
+            log.info("chronicle %s: converted %d summary block(s) from the first release", cid, n)
+            self.db.set_recap_due(cid, True)
+            events.append(self.db.append_event(cid, "memory", {
+                "text": "Memory format updated: a summary made by an earlier version of the app was converted so play can continue. "
+                        "The Storyteller will reread its notes next turn."
+            }))
+        for text in self.db.drop_unanswered_turns(cid):
+            log.info("chronicle %s: removed a turn that never got an answer", cid)
+            events.append(self.db.append_event(cid, "system", {
+                "text": "An earlier turn was interrupted before the Storyteller answered, so it was removed from the "
+                        f"Storyteller's memory. The message that was never answered: \u201c{text}\u201d. Send it again if you still want to say it."
+            }))
+        return events
+
+    def _unwind_turn(self, chronicle_id: str, base_seq: int, player_event: Event | None) -> None:
+        """Take back what an unanswered turn wrote: its messages, so the history stays valid
+        (a system message may never be followed by a user message), and its transcript entry."""
+        self.db.truncate_messages(chronicle_id, base_seq)
+        if player_event:
+            self.db.delete_event(chronicle_id, player_event["seq"])
 
     def _sync_prefix(self, ch: dict) -> None:
         """Thinking blocks are bound to the exact system prompt and tool list that produced
@@ -338,7 +354,7 @@ class Storyteller:
         self._sync_prefix(ch)
         repaired = self._repair_history(ch)
         if repaired:
-            yield repaired
+            yield from repaired
             ch = self.db.get_chronicle(chronicle_id)
         self.db.set_usage(chronicle_id, meter.start_turn(ch.get("usage") or {}))
         pending: list[Event] = []
@@ -351,106 +367,122 @@ class Storyteller:
 
         ctx = ToolContext(self.db, vault, chronicle_id, emit, chronicle_name=ch["name"], profile=profile_of(ch))
 
+        base_seq = self.db.last_message_seq(chronicle_id)  # the history before this turn
         player_event = None
-        if player_text is not None:
-            self.db.append_message(chronicle_id, "user", [{"type": "text", "text": player_text}])
-            player_event = self.db.append_event(chronicle_id, "player", {"text": player_text})
-            yield player_event
-        else:
-            self.db.append_message(chronicle_id, "user", [{"type": "text", "text": "[The table is ready. Begin.]"}])
-        state = _state_message(ch)
-        if operator_note:
-            state += "\n\n" + operator_note
-        self.db.append_message(chronicle_id, "system", state)
-
-        rounds = 0
-        healed = False
         answered = False  # has any response been saved for this turn?
-        while True:
-            rounds += 1
-            if rounds > 12:
-                yield {"kind": "error", "message": "too many tool rounds in one turn; stopping"}
-                break
-            messages = self.db.get_messages(chronicle_id)
-            text_buf: list[str] = []
-            try:
-                with self.client.beta.messages.stream(**self._request_kwargs(ch, messages)) as stream:
-                    for event in stream:
-                        if event.type == "text":
-                            text_buf.append(event.text)
-                            yield {"kind": "delta", "text": event.text}
-                        elif event.type == "content_block_start" and getattr(event.content_block, "type", "") == "tool_use":
-                            yield {"kind": "working", "name": event.content_block.name}
-                    response = stream.get_final_message()
-            except (ValueError, anthropic.APIStatusError, anthropic.APIConnectionError) as e:
-                if isinstance(e, anthropic.APIStatusError) and not healed and _is_thinking_binding_error(e):
-                    # Something before an old thinking block changed. Drop the blocks once and retry.
-                    healed = True
-                    n = self.db.strip_thinking(chronicle_id)
-                    log.warning("chronicle %s: API rejected old thinking blocks; cleared %d and retrying", chronicle_id, n)
-                    rounds -= 1
-                    continue
-                if isinstance(e, anthropic.APIStatusError):
-                    msg = f"API error {e.status_code}: {e.message}"
-                elif isinstance(e, anthropic.APIConnectionError):
-                    msg = f"connection error: {e}"
-                else:  # unparseable tool JSON from the stream
-                    msg = f"malformed tool call from the model: {e}"
-                err = {"kind": "error", "message": msg}
-                if not answered:
-                    # Nothing was answered, so unwind what this turn added and keep the history
-                    # valid (a system message may never be followed by a user message).
-                    self.db.pop_last_messages(chronicle_id, 2)
-                    if player_event:
-                        self.db.delete_event(chronicle_id, player_event["seq"])
-                        err["restore_text"] = player_text
-                        err["unsent_seq"] = player_event["seq"]
-                yield err
-                break
+        unwound = False  # have this turn's unanswered messages been taken back already?
+        try:
+            if player_text is not None:
+                self.db.append_message(chronicle_id, "user", [{"type": "text", "text": player_text}])
+                player_event = self.db.append_event(chronicle_id, "player", {"text": player_text})
+                yield player_event
+            else:
+                self.db.append_message(chronicle_id, "user", [{"type": "text", "text": "[The table is ready. Begin.]"}])
+            state = _state_message(ch)
+            if operator_note:
+                state += "\n\n" + operator_note
+            self.db.append_message(chronicle_id, "system", state)
 
-            answered = True
-            self._note_usage(chronicle_id, getattr(response, "usage", None))
-            if ch.get("recap_due"):
-                self.db.set_recap_due(chronicle_id, False)  # the recap has been shown
-                ch["recap_due"] = 0
-            content = [b.model_dump(mode="json", exclude_none=True) for b in response.content]
-            self.db.append_message(chronicle_id, "assistant", content)
-            narration = "".join(text_buf).strip()
-            if narration:
-                yield self.db.append_event(chronicle_id, "narration", {"text": narration})
-
-            for b in response.content:
-                if b.type == "fallback":
-                    yield self.db.append_event(chronicle_id, "system", {"text": f"Rerouted: {b.from_.model} declined this turn, {b.to.model} continued."})
-
-            if response.stop_reason == "pause_turn":
-                continue
-            if response.stop_reason == "refusal":
-                yield self.db.append_event(chronicle_id, "system", {"text": "The model declined to continue this turn. Rephrase and try again."})
-                break
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if not tool_uses:
-                if response.stop_reason == "max_tokens":
-                    yield self.db.append_event(chronicle_id, "system", {"text": "Output hit the token limit; say 'continue' to go on."})
-                break
-            if response.stop_reason == "max_tokens":
-                yield {"kind": "error", "message": "tool input was cut off by the token limit; try again"}
-                # Answer the dangling tool_use so the history stays valid.
-                self.db.append_message(chronicle_id, "user", [
-                    {"type": "tool_result", "tool_use_id": t.id, "is_error": True, "content": "truncated"} for t in tool_uses
-                ])
-                break
-
-            results = []
-            for t in tool_uses:
+            rounds = 0
+            healed = False
+            while True:
+                rounds += 1
+                if rounds > 12:
+                    yield {"kind": "error", "message": "too many tool rounds in one turn; stopping"}
+                    break
+                messages = self.db.get_messages(chronicle_id)
+                text_buf: list[str] = []
                 try:
-                    out = ctx.run(t.name, t.input)
-                    results.append({"type": "tool_result", "tool_use_id": t.id, "content": out})
-                except Exception as e:  # tool errors go back to the model, not to the player
-                    results.append({"type": "tool_result", "tool_use_id": t.id, "is_error": True, "content": f"{type(e).__name__}: {e}"})
-                while pending:
-                    yield pending.pop(0)
-            self.db.append_message(chronicle_id, "user", results)
+                    with self.client.beta.messages.stream(**self._request_kwargs(ch, messages)) as stream:
+                        for event in stream:
+                            if event.type == "text":
+                                text_buf.append(event.text)
+                                yield {"kind": "delta", "text": event.text}
+                            elif event.type == "content_block_start" and getattr(event.content_block, "type", "") == "tool_use":
+                                yield {"kind": "working", "name": event.content_block.name}
+                        response = stream.get_final_message()
+                except (ValueError, anthropic.APIStatusError, anthropic.APIConnectionError, httpx2.HTTPError) as e:
+                    if isinstance(e, anthropic.APIStatusError) and not healed and _is_thinking_binding_error(e):
+                        # Something before an old thinking block changed. Drop the blocks once and retry.
+                        healed = True
+                        n = self.db.strip_thinking(chronicle_id)
+                        log.warning("chronicle %s: API rejected old thinking blocks; cleared %d and retrying", chronicle_id, n)
+                        rounds -= 1
+                        continue
+                    if isinstance(e, anthropic.APIStatusError):
+                        msg = f"API error {e.status_code}: {e.message}"
+                    elif isinstance(e, (anthropic.APIConnectionError, httpx2.HTTPError)):
+                        # Before the first byte arrives the SDK raises its own connection error; once
+                        # the stream is open, a dropped connection surfaces as the raw transport error.
+                        msg = f"connection error: {e}"
+                    else:  # unparseable tool JSON from the stream
+                        msg = f"malformed tool call from the model: {e}"
+                    err = {"kind": "error", "message": msg}
+                    if not answered:
+                        # Nothing was answered, so unwind what this turn added and keep the history
+                        # valid (a system message may never be followed by a user message).
+                        self._unwind_turn(chronicle_id, base_seq, player_event)
+                        unwound = True
+                        if player_event:
+                            err["restore_text"] = player_text
+                            err["unsent_seq"] = player_event["seq"]
+                    yield err
+                    break
+
+                answered = True
+                self._note_usage(chronicle_id, getattr(response, "usage", None))
+                if ch.get("recap_due"):
+                    self.db.set_recap_due(chronicle_id, False)  # the recap has been shown
+                    ch["recap_due"] = 0
+                content = [b.model_dump(mode="json", exclude_none=True) for b in response.content]
+                self.db.append_message(chronicle_id, "assistant", content)
+                narration = "".join(text_buf).strip()
+                if narration:
+                    yield self.db.append_event(chronicle_id, "narration", {"text": narration})
+
+                for b in response.content:
+                    if b.type == "fallback":
+                        yield self.db.append_event(chronicle_id, "system", {"text": f"Rerouted: {b.from_.model} declined this turn, {b.to.model} continued."})
+
+                if response.stop_reason == "pause_turn":
+                    continue
+                if response.stop_reason == "refusal":
+                    yield self.db.append_event(chronicle_id, "system", {"text": "The model declined to continue this turn. Rephrase and try again."})
+                    break
+                tool_uses = [b for b in response.content if b.type == "tool_use"]
+                if not tool_uses:
+                    if response.stop_reason == "max_tokens":
+                        yield self.db.append_event(chronicle_id, "system", {"text": "Output hit the token limit; say 'continue' to go on."})
+                    break
+                if response.stop_reason == "max_tokens":
+                    yield {"kind": "error", "message": "tool input was cut off by the token limit; try again"}
+                    # Answer the dangling tool_use so the history stays valid.
+                    self.db.append_message(chronicle_id, "user", [
+                        {"type": "tool_result", "tool_use_id": t.id, "is_error": True, "content": "truncated"} for t in tool_uses
+                    ])
+                    break
+
+                results = []
+                for t in tool_uses:
+                    try:
+                        out = ctx.run(t.name, t.input)
+                        results.append({"type": "tool_result", "tool_use_id": t.id, "content": out})
+                    except Exception as e:  # tool errors go back to the model, not to the player
+                        results.append({"type": "tool_result", "tool_use_id": t.id, "is_error": True, "content": f"{type(e).__name__}: {e}"})
+                    while pending:
+                        yield pending.pop(0)
+                self.db.append_message(chronicle_id, "user", results)
+        finally:
+            if not answered and not unwound:
+                # The turn ended some other way: the browser went away mid-stream (this generator
+                # was closed) or an error the loop does not handle. Leave the history valid, and
+                # tell the player on their return that the message never got through.
+                self._unwind_turn(chronicle_id, base_seq, player_event)
+                if player_event:
+                    self.db.append_event(chronicle_id, "system", {
+                        "text": "The turn was interrupted before the Storyteller answered. This message was not delivered: "
+                                f"\u201c{player_text}\u201d. Send it again to continue."
+                    })
 
         if answered and config.ENABLE_COMPACTION:
             usage = self.db.get_chronicle(chronicle_id).get("usage") or {}

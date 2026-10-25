@@ -55,6 +55,8 @@ Then restart the server. If `requirements.txt` changed, rerun `pip install -r st
 
 **Chronicles from the first version.** If a chronicle grew long enough under the first version for the API to summarize it (an "Input tag 'compaction'" error on every turn was the symptom), the app converts that old summary into plain text at the start of the next turn and carries on. A line in the transcript says so.
 
+**A turn interrupted by a lost connection.** If the network drops while the Storyteller is answering, the message you sent goes back into the box and nothing is kept from that turn. If the app itself was interrupted first (a release before this one could leave the chronicle refusing every turn with "role 'system' must precede an 'assistant' message"), the next turn removes the unanswered message from the Storyteller's memory and says so in the transcript. Send it again to continue.
+
 **Editing notes mid-chronicle.** You can edit any vault note while a chronicle is running. Changes to the notes loaded into every turn (the Storyteller Reference, Setting, and campaign overview notes) take effect the next time you start the server. When the app detects that the Storyteller's instructions changed, whether from an update or your edits, it clears the model's hidden reasoning from earlier turns once so the API keeps accepting the chronicle. Narration, rolls, and notes are untouched.
 
 ## Configuration

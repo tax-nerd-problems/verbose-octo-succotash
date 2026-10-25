@@ -262,6 +262,67 @@ class TurnLoopTests(unittest.TestCase):
         self.assertEqual(self.db.get_messages(self.ch["id"]), [])
         self.assertEqual(self.db.get_events(self.ch["id"]), [])  # the unsent message leaves no trace
 
+    def test_dropped_connection_mid_stream_unwinds_history(self):
+        # Once the stream is open, a lost connection surfaces as the raw transport error,
+        # not as the SDK's APIConnectionError. The turn must still be taken back.
+        import httpx2
+
+        class Dropping(FakeStream):
+            def __iter__(self):
+                yield SimpleNamespace(type="text", text="Rene ")
+                raise httpx2.ReadTimeout("the wifi went away")
+
+        class Client(FakeClient):
+            def _stream(self, **kw):
+                self.requests.append(kw)
+                return Dropping(None)
+
+        st = Storyteller(self.db, self.vault, Client([]))
+        events = list(st.turn(self.ch["id"], "Hello"))
+        err = next(e for e in events if e["kind"] == "error")
+        self.assertIn("connection error", err["message"])
+        self.assertEqual(err["restore_text"], "Hello")
+        self.assertEqual(self.db.get_messages(self.ch["id"]), [])
+        self.assertEqual(self.db.get_events(self.ch["id"]), [])
+        # the next turn goes out over a valid history
+        st.client = FakeClient([msg(text("Rene smiles."))])
+        self.assertEqual(list(st.turn(self.ch["id"], "Hello again"))[-1]["kind"], "done")
+        self.assertEqual([m["role"] for m in self.db.get_messages(self.ch["id"])], ["user", "system", "assistant"])
+
+    def test_browser_disconnect_mid_stream_unwinds_history(self):
+        client = FakeClient([msg(text("Rene smiles."))])
+        st = Storyteller(self.db, self.vault, client)
+        gen = st.turn(self.ch["id"], "Hello")
+        self.assertEqual(next(gen)["kind"], "player")
+        self.assertEqual(next(gen)["kind"], "delta")  # the first words were on their way
+        gen.close()  # the browser went away; the server closes the stream
+        self.assertEqual(self.db.get_messages(self.ch["id"]), [])
+        events = self.db.get_events(self.ch["id"])
+        self.assertEqual([e["kind"] for e in events], ["system"])
+        self.assertIn("Hello", events[0]["text"])  # the player sees on return what was lost
+
+    def test_history_left_by_an_interrupted_turn_is_repaired(self):
+        # What a release before the fix left behind when the connection dropped mid-turn:
+        # the history ends in the Storyteller-screen system message, and every later turn
+        # was refused with "role 'system' must precede an 'assistant' message".
+        cid = self.ch["id"]
+        self.db.append_message(cid, "user", [{"type": "text", "text": "I enter."}])
+        self.db.append_message(cid, "system", "Storyteller screen: {}")
+        self.db.append_message(cid, "assistant", [{"type": "text", "text": "You enter."}])
+        self.db.append_message(cid, "user", [{"type": "text", "text": "I bow."}])
+        self.db.append_message(cid, "system", "Storyteller screen: {}")
+        client = FakeClient([msg(text("Rene nods."))])
+        st = Storyteller(self.db, self.vault, client)
+        events = list(st.turn(cid, "I speak."))
+        self.assertEqual(events[0]["kind"], "system")
+        self.assertIn("I bow.", events[0]["text"])
+        self.assertEqual(events[-1]["kind"], "done")
+        sent = client.requests[0]["messages"]
+        self.assertEqual([m["role"] for m in sent], ["user", "system", "assistant", "user", "system"])
+        self.assertEqual(sent[-2]["content"][0]["text"], "I speak.")
+        # a second run finds nothing to repair
+        self.assertEqual(self.db.drop_unanswered_turns(cid), [])
+
 
 # ---------- sheet view ----------
 from storyteller.sheet import sheet_view  # noqa: E402
